@@ -56,51 +56,50 @@ const generateMaze = (width = 17, height = 17): number[][] => {
   return maze;
 };
 
-// Размещение приза в сложном диапазоне для шанса победы ~7%
-const placePrize = (maze: number[][], playerPos: Position): Position => {
-  const passages: Position[] = [];
-  for (let y = 0; y < maze.length; y++) {
-    for (let x = 0; x < maze[y].length; x++) {
-      if (maze[y][x] === 0 && (x !== playerPos.x || y !== playerPos.y)) {
-        passages.push({ x, y });
-      }
-    }
-  }
-  
-  // Размещаем приз на расстоянии 10-20 шагов от игрока для сложности
-  const validPrizes = passages.filter(pos => {
-    const distance = Math.abs(pos.x - playerPos.x) + Math.abs(pos.y - playerPos.y);
-    return distance >= 10 && distance <= 20;
-  });
-  
-  // Если нет подходящих позиций в нужном диапазоне, берем самые дальние
-  if (validPrizes.length === 0) {
-    const sortedByDistance = passages.sort((a, b) => {
-      const distA = Math.abs(a.x - playerPos.x) + Math.abs(a.y - playerPos.y);
-      const distB = Math.abs(b.x - playerPos.x) + Math.abs(b.y - playerPos.y);
-      return distB - distA;
-    });
-    
-    // Берем один из 3 самых дальних
-    const farPrizes = sortedByDistance.slice(0, 3);
-    return farPrizes[Math.floor(Math.random() * farPrizes.length)];
-  }
-  
-  return validPrizes[Math.floor(Math.random() * validPrizes.length)];
-};
+
 
 const MazeGame = ({ user, theme }: MazeGameProps) => {
+  // Список дебаг пользователей (вы + партнеры)
+  const DEBUG_USER_IDS = [
+    379502446,  // @Scilef
+    282577511, //@Wezekable
+    // 409022180 //@mdakekv
+  ];
+  const isDebugUser = user?.id && DEBUG_USER_IDS.includes(user.id);
+
+  // НАСТРОЙКИ БАЛАНСА ИГРЫ (легко настраивать)
+  const GAME_SETTINGS = {
+    MIN_PRIZE_VALUE: 0.5,
+    // Размер лабиринта
+    MAZE_SIZE: 19,
+    
+    // Время на игру (секунды)
+    GAME_TIME: 30,
+    
+    // Стоимость платной попытки
+    PAID_ATTEMPT_COST: 9,
+    
+    // Размещение приза
+    PRIZE_MIN_DISTANCE: 15,  // минимальное расстояние до приза
+    PRIZE_MAX_DISTANCE: 30,  // максимальное расстояние до приза
+    
+    // Стартовая позиция игрока
+    START_X: 1,
+    START_Y: 1,
+  };
+
   const [gameState, setGameState] = useState<GameState>('menu');
   const [maze, setMaze] = useState<number[][]>([]);
-  const [playerPos, setPlayerPos] = useState<Position>({ x: 1, y: 1 });
+  const [playerPos, setPlayerPos] = useState<Position>({ x: 1, y: 1 }); // Начальная позиция, будет перезаписана при старте игры
   const [prizePos, setPrizePos] = useState<Position>({ x: 0, y: 0 });
-  const [timeLeft, setTimeLeft] = useState(30);
+  const [timeLeft, setTimeLeft] = useState(GAME_SETTINGS.GAME_TIME);
   const [hasFreeTry, setHasFreeTry] = useState(true);
   const [stepCount, setStepCount] = useState(0);
   const [isPaymentProcessing, setIsPaymentProcessing] = useState(false);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [gameStartTime, setGameStartTime] = useState<number>(0);
   const [cooldownTime, setCooldownTime] = useState(0);
+  const [prizeValue, setPrizeValue] = useState<string>(`от ${GAME_SETTINGS.MIN_PRIZE_VALUE}$`); // Стоимость текущего приза
   const [playerStats, setPlayerStats] = useState({
     total_attempts: 0,
     total_wins: 0,
@@ -109,6 +108,10 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
   
   // Добавляем ref для таймера
   const timerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // ДОБАВЛЯЕМ новые состояния для защиты от повторного получения приза
+  const [isPrizeClaimed, setIsPrizeClaimed] = useState(false);
+  const [isClaimingPrize, setIsClaimingPrize] = useState(false);
 
   // Проверка доступных направлений
   const getAvailableDirections = useCallback((): Direction[] => {
@@ -167,16 +170,26 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     }
   }, [currentSessionId, user?.id, gameStartTime]); // Убрали playerPos и stepCount
 
-  // Получение приза (ИСПРАВЛЕНО)
+  // Получение приза (ИСПРАВЛЕНО - защита от повторных вызовов)
   const claimPrize = useCallback(async () => {
+    // Защита от повторных вызовов
+    if (isPrizeClaimed || isClaimingPrize || !user?.id || !currentSessionId) {
+      return;
+    }
+
+    setIsClaimingPrize(true);
+
     try {
       // Передаем ID пользователя и сессии для проверки
-      const prizeLink = await gameAPI.getAvailablePrize(user?.id, currentSessionId);
+      const prizeLink = await gameAPI.getAvailablePrize(user.id, currentSessionId);
       
       if (prizeLink && prizeLink !== 'https://example.com/demo-prize') {
+        // Отмечаем приз как полученный ПЕРЕД открытием ссылки
+        setIsPrizeClaimed(true);
         // Перенаправляем на реальный приз
         window.open(prizeLink, '_blank');
       } else if (prizeLink === 'https://example.com/demo-prize') {
+        setIsPrizeClaimed(true);
         alert('🎉 Поздравляем с победой!\n\n⚠️ К сожалению, реальные призы временно закончились, но ваша победа засчитана!\n\nСледите за обновлениями - скоро добавим новые призы!');
       } else {
         alert('❌ Ошибка: Приз недоступен.\n\nВозможные причины:\n• Платеж не подтвержден\n• Сессия не найдена\n• Технические неполадки\n\nОбратитесь в поддержку.');
@@ -184,8 +197,10 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     } catch (error) {
       console.error('Ошибка получения приза:', error);
       alert('Произошла ошибка при получении приза. Обратитесь в поддержку.');
+    } finally {
+      setIsClaimingPrize(false);
     }
-  }, [user?.id, currentSessionId]);
+  }, [user?.id, currentSessionId, isPrizeClaimed, isClaimingPrize]);
 
   // Проверка победы после каждого хода
   useEffect(() => {
@@ -272,36 +287,46 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     };
   }, [gameState]); // Только зависимость от gameState
   
-  // Загрузка данных игрока при старте
+  // Загрузка данных игрока при старте (ИЗМЕНЕНО для дебага)
   useEffect(() => {
     const loadPlayerData = async () => {
       if (!user?.id) return;
       
       try {
-        // Проверяем доступность бесплатной попытки
-        const canPlay = await gameAPI.canPlayFree(user.id);
-        setHasFreeTry(canPlay);
+        // Для дебаг пользователя всегда разрешаем бесплатную игру
+        if (isDebugUser) {
+          setHasFreeTry(true);
+          setCooldownTime(0);
+        } else {
+          // Проверяем доступность бесплатной попытки
+          const canPlay = await gameAPI.canPlayFree(user.id);
+          setHasFreeTry(canPlay);
+          
+          // Если не может играть бесплатно, получаем время до следующей попытки
+          if (!canPlay) {
+            const timeUntil = await gameAPI.getTimeUntilNextFree(user.id);
+            setCooldownTime(timeUntil);
+          }
+        }
         
         // Загружаем статистику игрока
         const stats = await gameAPI.getPlayerStats(user.id);
         setPlayerStats(stats);
         
-        // Если не может играть бесплатно, получаем время до следующей попытки
-        if (!canPlay) {
-          const timeUntil = await gameAPI.getTimeUntilNextFree(user.id);
-          setCooldownTime(timeUntil);
-        }
+        // Загружаем стоимость доступного приза
+        const prizeVal = await gameAPI.getAvailablePrizeValue();
+        setPrizeValue(prizeVal);
       } catch (error) {
         console.error('Ошибка загрузки данных игрока:', error);
       }
     };
     
     loadPlayerData();
-  }, [user]);
+  }, [user, isDebugUser]);
 
-  // Таймер cooldown
+  // Таймер cooldown (ИЗМЕНЕНО для дебага)
   useEffect(() => {
-    if (cooldownTime > 0 && !hasFreeTry) {
+    if (cooldownTime > 0 && !hasFreeTry && !isDebugUser) {
       const timer = setInterval(() => {
         setCooldownTime(prev => {
           if (prev <= 1) {
@@ -314,44 +339,64 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
       
       return () => clearInterval(timer);
     }
-  }, [cooldownTime, hasFreeTry]);
+  }, [cooldownTime, hasFreeTry, isDebugUser]);
 
-  // Инициализация игры
+  // Инициализация игры (ДОПОЛНЕНО - сброс состояния приза)
   const startGame = useCallback(async (isFree = true) => {
     if (!user?.id) {
       console.error('Пользователь не найден');
       return;
     }
 
+    // Сбрасываем состояние приза при старте новой игры
+    setIsPrizeClaimed(false);
+    setIsClaimingPrize(false);
+
     try {
-      // Регистрируем попытку в базе данных
-      const sessionId = await gameAPI.registerAttempt(
-        user.id,
-        user.first_name,
-        user.username,
-        isFree
-      );
-      
-      if (!sessionId) {
-        console.error('Не удалось зарегистрировать попытку');
-        return;
+      // Для дебаг пользователя не регистрируем попытки в БД
+      let sessionId;
+      if (isDebugUser) {
+        sessionId = `debug_${Date.now()}`;
+      } else {
+        // Регистрируем попытку в базе данных
+        sessionId = await gameAPI.registerAttempt(
+          user.id,
+          user.first_name,
+          user.username,
+          isFree
+        );
+        
+        if (!sessionId) {
+          console.error('Не удалось зарегистрировать попытку');
+          return;
+        }
       }
       
       setCurrentSessionId(sessionId);
       setGameStartTime(Date.now());
       
-      const newMaze = generateMaze(); // 17x17 теперь
-      const startPos: Position = { x: 3, y: 3 }; // Ближе к углу для усложнения
+      // Обновляем стоимость приза на каждую новую игру
+      try {
+        const prizeVal = await gameAPI.getAvailablePrizeValue();
+        setPrizeValue(prizeVal);
+      } catch (error) {
+        console.error('Ошибка обновления стоимости приза:', error);
+      }
+      
+      // ПАРАМЕТРЫ ДЛЯ НАСТРОЙКИ СЛОЖНОСТИ:
+      const mazeSize = GAME_SETTINGS.MAZE_SIZE;
+      const newMaze = generateMaze(mazeSize, mazeSize);
+      const startPos = getRandomStartPosition(newMaze); // Случайная стартовая позиция
       const prize = placePrize(newMaze, startPos);
       
       setMaze(newMaze);
       setPlayerPos(startPos);
       setPrizePos(prize);
-      setTimeLeft(30);
+      setTimeLeft(GAME_SETTINGS.GAME_TIME); // Уменьшаем время с 30 до 25 секунд
       setStepCount(0);
       setGameState('playing');
       
-      if (isFree) {
+      if (isFree && !isDebugUser) {
         setHasFreeTry(false);
         // Обновляем cooldown
         const timeUntil = await gameAPI.getTimeUntilNextFree(user.id);
@@ -360,7 +405,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     } catch (error) {
       console.error('Ошибка старта игры:', error);
     }
-  }, [user]);
+  }, [user, isDebugUser]);
   
   // Функция оплаты в звёздах
   const buyAttempt = useCallback(async () => {
@@ -411,7 +456,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
         
         if (WebApp.showConfirm) {
           WebApp.showConfirm(
-            '⭐ Потратить 2 звезды на дополнительную попытку?\n\n(Режим тестирования - реальной оплаты не будет)',
+            `⭐ Потратить ${GAME_SETTINGS.PAID_ATTEMPT_COST} звезды на дополнительную попытку?\n\n(Режим тестирования - реальной оплаты не будет)`,
             async (confirmed: boolean) => {
               setIsPaymentProcessing(false);
               if (confirmed) {
@@ -450,6 +495,172 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     // setTheme(isDark ? 'dark' : 'light'); // This line is removed as theme is now a prop
   }, []);
+
+  // Выбор случайной стартовой позиции из проходов лабиринта
+  const getRandomStartPosition = useCallback((maze: number[][]): Position => {
+    const passages: Position[] = [];
+    
+    // Собираем все проходы и считаем количество доступных направлений
+    for (let y = 0; y < maze.length; y++) {
+      for (let x = 0; x < maze[y].length; x++) {
+        if (maze[y][x] === 0) {
+          // Считаем доступные направления из этой позиции
+          let directions = 0;
+          if (y > 0 && maze[y - 1][x] === 0) directions++; // вверх
+          if (y < maze.length - 1 && maze[y + 1][x] === 0) directions++; // вниз
+          if (x > 0 && maze[y][x - 1] === 0) directions++; // влево
+          if (x < maze[0].length - 1 && maze[y][x + 1] === 0) directions++; // вправо
+          
+          // Избегаем тупиков (позиций с только одним направлением)
+          if (directions >= 2) {
+            passages.push({ x, y });
+          }
+        }
+      }
+    }
+    
+    // Если нет подходящих позиций, берем любые проходы
+    if (passages.length === 0) {
+      for (let y = 0; y < maze.length; y++) {
+        for (let x = 0; x < maze[y].length; x++) {
+          if (maze[y][x] === 0) {
+            passages.push({ x, y });
+          }
+        }
+      }
+    }
+    
+    // Разделяем позиции на категории для разнообразия
+    const corners = passages.filter(pos => {
+      const distToCorner = Math.min(
+        pos.x + pos.y, // верхний левый
+        (maze[0].length - 1 - pos.x) + pos.y, // верхний правый
+        pos.x + (maze.length - 1 - pos.y), // нижний левый
+        (maze[0].length - 1 - pos.x) + (maze.length - 1 - pos.y) // нижний правый
+      );
+      return distToCorner <= 4; // В пределах 4 шагов от угла
+    });
+    
+    const edges = passages.filter(pos => 
+      pos.x <= 2 || pos.x >= maze[0].length - 3 || 
+      pos.y <= 2 || pos.y >= maze.length - 3
+    );
+    
+    const center = passages.filter(pos => 
+      pos.x > maze[0].length / 3 && pos.x < 2 * maze[0].length / 3 &&
+      pos.y > maze.length / 3 && pos.y < 2 * maze.length / 3
+    );
+    
+    // Случайно выбираем категорию (70% углы/края, 30% центр для баланса сложности)
+    const rand = Math.random();
+    let availablePositions: Position[];
+    
+    if (rand < 0.4 && corners.length > 0) {
+      availablePositions = corners; // 40% углы
+    } else if (rand < 0.7 && edges.length > 0) {
+      availablePositions = edges;   // 30% края
+    } else if (center.length > 0) {
+      availablePositions = center;  // 30% центр
+    } else {
+      availablePositions = passages; // fallback
+    }
+    
+    return availablePositions[Math.floor(Math.random() * availablePositions.length)];
+  }, []);
+
+  // Размещение приза в сложном диапазоне для снижения винрейта (ИЗМЕНЕНО)
+  const placePrize = useCallback((maze: number[][], playerPos: Position): Position => {
+    const passages: Position[] = [];
+    for (let y = 0; y < maze.length; y++) {
+      for (let x = 0; x < maze[y].length; x++) {
+        if (maze[y][x] === 0 && (x !== playerPos.x || y !== playerPos.y)) {
+          passages.push({ x, y });
+        }
+      }
+    }
+    
+    // НОВЫЕ ПАРАМЕТРЫ для снижения винрейта:
+    // Увеличиваем минимальное расстояние до приза
+    const minDistance = GAME_SETTINGS.PRIZE_MIN_DISTANCE; // было 10
+    const maxDistance = GAME_SETTINGS.PRIZE_MAX_DISTANCE; // было 20
+    
+    const validPrizes = passages.filter(pos => {
+      const distance = Math.abs(pos.x - playerPos.x) + Math.abs(pos.y - playerPos.y);
+      return distance >= minDistance && distance <= maxDistance;
+    });
+    
+    // Если нет подходящих позиций в нужном диапазоне, берем только самый дальний
+    if (validPrizes.length === 0) {
+      const sortedByDistance = passages.sort((a, b) => {
+        const distA = Math.abs(a.x - playerPos.x) + Math.abs(a.y - playerPos.y);
+        const distB = Math.abs(b.x - playerPos.x) + Math.abs(b.y - playerPos.y);
+        return distB - distA;
+      });
+      
+      // Берем ТОЛЬКО самый дальний (было: один из 3 самых дальних)
+      return sortedByDistance[0];
+    }
+    
+    return validPrizes[Math.floor(Math.random() * validPrizes.length)];
+  }, []);
+
+  // Компонент визуализации карты для дебага
+  const MazeDebugView = () => {
+    if (!isDebugUser || maze.length === 0) return null;
+    
+    const cellSize = Math.min(Math.floor(300 / maze.length), 20);
+    
+    return (
+      <div className="mb-4 p-4 bg-gray-800 rounded-lg">
+        <h3 className="text-sm font-bold mb-2 text-center text-white">🔧 Карта лабиринта (дебаг)</h3>
+        <div 
+          className="mx-auto grid border border-gray-600"
+          style={{ 
+            gridTemplateColumns: `repeat(${maze[0]?.length || 0}, ${cellSize}px)`,
+            width: 'fit-content'
+          }}
+        >
+          {maze.map((row, y) =>
+            row.map((cell, x) => {
+              const isPlayer = playerPos.x === x && playerPos.y === y;
+              const isPrize = prizePos.x === x && prizePos.y === y;
+              const isWall = cell === 1;
+              
+              let bgColor = isWall ? 'bg-gray-700' : 'bg-gray-200';
+              let content = '';
+              
+              if (isPlayer) {
+                bgColor = 'bg-blue-500';
+                content = '🚶';
+              } else if (isPrize) {
+                bgColor = 'bg-green-500';
+                content = '🎁';
+              }
+              
+              return (
+                <div
+                  key={`${x}-${y}`}
+                  className={`${bgColor} border border-gray-500 flex items-center justify-center text-xs`}
+                  style={{ 
+                    width: `${cellSize}px`, 
+                    height: `${cellSize}px`,
+                    fontSize: `${Math.max(cellSize - 8, 8)}px`
+                  }}
+                >
+                  {content}
+                </div>
+              );
+            })
+          )}
+        </div>
+        <div className="text-xs mt-2 text-gray-300 text-center">
+          <div>Расстояние до приза: {Math.abs(prizePos.x - playerPos.x) + Math.abs(prizePos.y - playerPos.y)} шагов</div>
+          <div>Стартовая позиция: ({playerPos.x}, {playerPos.y})</div>
+          <div>Позиция приза: ({prizePos.x}, {prizePos.y})</div>
+        </div>
+      </div>
+    );
+  };
   
   const availableDirections = getAvailableDirections();
   const bgColor = theme === 'dark' ? 'bg-gray-900' : 'bg-white';
@@ -465,9 +676,14 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
           {user && (
             <p className="text-lg mb-2">Привет, {user.first_name}! 👋</p>
           )}
-          <p className="text-lg mb-4">Найди приз за 30 секунд!</p>
+          {isDebugUser && (
+            <p className="text-sm mb-2 bg-yellow-500 text-black px-3 py-1 rounded">
+              🔧 РЕЖИМ ОТЛАДКИ
+            </p>
+          )}
+          <p className="text-lg mb-4">Найди приз за {GAME_SETTINGS.GAME_TIME} секунд!</p>
           <p className="text-sm mb-4 opacity-75">
-            Приз: <span className="font-bold text-green-500">$10</span>
+            Приз: <span className="font-bold text-green-500">{prizeValue}</span>
           </p>
           
           {/* Статистика игрока */}
@@ -482,12 +698,12 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
           </div>
           
           <div className="space-y-4">
-            {hasFreeTry ? (
+            {hasFreeTry || isDebugUser ? (
               <button
                 onClick={() => startGame(true)}
                 className="w-full bg-blue-500 text-white py-3 px-6 rounded-lg text-lg font-semibold"
               >
-                🆓 Бесплатная попытка
+                🆓 Бесплатная попытка {isDebugUser ? '(∞)' : ''}
               </button>
             ) : (
               <button
@@ -498,17 +714,19 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
               </button>
             )}
             
-            <button
-              onClick={buyAttempt}
-              disabled={isPaymentProcessing}
-              className={`w-full py-3 px-6 rounded-lg text-lg font-semibold ${
-                isPaymentProcessing 
-                  ? 'bg-gray-400 opacity-50' 
-                  : 'bg-yellow-500 hover:bg-yellow-600'
-              } text-white`}
-            >
-              {isPaymentProcessing ? '⏳ Обработка...' : '⭐ Купить попытку (2 звезды)'}
-            </button>
+            {!isDebugUser && (
+              <button
+                onClick={buyAttempt}
+                disabled={isPaymentProcessing}
+                className={`w-full py-3 px-6 rounded-lg text-lg font-semibold ${
+                  isPaymentProcessing 
+                    ? 'bg-gray-400 opacity-50' 
+                    : 'bg-yellow-500 hover:bg-yellow-600'
+                } text-white`}
+              >
+                {isPaymentProcessing ? '⏳ Обработка...' : `⭐ Купить попытку (${GAME_SETTINGS.PAID_ATTEMPT_COST} звезд)`}
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -531,9 +749,12 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
             Шагов: {stepCount}
           </div>
           <div className="text-lg font-semibold">
-            🎯 $10
+            🎯 {prizeValue}
           </div>
         </div>
+        
+        {/* Дебаг карта для отладки */}
+        {isDebugUser && <MazeDebugView />}
         
         {/* Основной экран - показывает только доступные направления */}
         <div className="flex-1 flex flex-col justify-center items-center p-8">
@@ -636,17 +857,60 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
           <h1 className="text-3xl font-bold mb-4">Поздравляем!</h1>
           <p className="text-lg mb-2">Вы нашли приз!</p>
           <p className="text-sm opacity-75 mb-6">
-            За {25 - timeLeft} секунд и {stepCount} шагов {/* Изменили с 30 на 25 */}
+            За {GAME_SETTINGS.GAME_TIME - timeLeft} секунд и {stepCount} шагов
           </p>
-          <p className="text-2xl font-bold text-green-500 mb-8">💰 $10</p>
+          <p className="text-2xl font-bold text-green-500 mb-8">💰 {prizeValue}</p>
+          
+          {/* Показываем статус получения приза */}
+          {isPrizeClaimed && (
+            <div className="mb-4 p-3 bg-green-100 dark:bg-green-900 rounded-lg">
+              <p className="text-green-800 dark:text-green-200 text-sm">
+                ✅ Приз успешно получен!
+              </p>
+            </div>
+          )}
           
           <div className="space-y-4">
-            <button
-              onClick={claimPrize}
-              className="w-full bg-green-500 text-white py-3 px-6 rounded-lg text-lg font-semibold"
-            >
-              🎁 Получить приз $10
-            </button>
+            {isDebugUser ? (
+              <button
+                onClick={() => {
+                  if (!isPrizeClaimed) {
+                    setIsPrizeClaimed(true);
+                    alert('🔧 ДЕБАГ РЕЖИМ\n\nВ реальном режиме здесь был бы получен приз.\nВы можете изучать параметры генерации лабиринта.');
+                  }
+                }}
+                disabled={isPrizeClaimed}
+                className={`w-full py-3 px-6 rounded-lg text-lg font-semibold ${
+                  isPrizeClaimed 
+                    ? 'bg-gray-400 text-white opacity-50' 
+                    : 'bg-yellow-500 text-white hover:bg-yellow-600'
+                }`}
+              >
+                {isPrizeClaimed 
+                  ? '✅ Приз получен (дебаг)' 
+                  : `🔧 [ДЕБАГ] Получить приз ${prizeValue}`
+                }
+              </button>
+            ) : (
+              <button
+                onClick={claimPrize}
+                disabled={isPrizeClaimed || isClaimingPrize}
+                className={`w-full py-3 px-6 rounded-lg text-lg font-semibold ${
+                  isPrizeClaimed 
+                    ? 'bg-gray-400 text-white opacity-50' 
+                    : isClaimingPrize 
+                    ? 'bg-yellow-500 text-white opacity-70'
+                    : 'bg-green-500 text-white hover:bg-green-600'
+                }`}
+              >
+                {isPrizeClaimed 
+                  ? '✅ Приз получен' 
+                  : isClaimingPrize 
+                  ? '⏳ Получение приза...' 
+                  : `🎁 Получить приз ${prizeValue}`
+                }
+              </button>
+            )}
             
             <button
               onClick={() => setGameState('menu')}
@@ -672,17 +936,19 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
           </p>
           
           <div className="space-y-4">
-            <button
-              onClick={buyAttempt}
-              disabled={isPaymentProcessing}
-              className={`w-full py-3 px-6 rounded-lg text-lg font-semibold ${
-                isPaymentProcessing 
-                  ? 'bg-gray-400 opacity-50' 
-                  : 'bg-yellow-500 hover:bg-yellow-600'
-              } text-white`}
-            >
-              {isPaymentProcessing ? '⏳ Обработка...' : '⭐ Попробовать ещё (2 звезды)'}
-            </button>
+            {!isDebugUser && (
+              <button
+                onClick={buyAttempt}
+                disabled={isPaymentProcessing}
+                className={`w-full py-3 px-6 rounded-lg text-lg font-semibold ${
+                  isPaymentProcessing 
+                    ? 'bg-gray-400 opacity-50' 
+                    : 'bg-yellow-500 hover:bg-yellow-600'
+                } text-white`}
+              >
+                {isPaymentProcessing ? '⏳ Обработка...' : `⭐ Попробовать ещё (${GAME_SETTINGS.PAID_ATTEMPT_COST} звезд)`}
+              </button>
+            )}
             
             <button
               onClick={() => setGameState('menu')}

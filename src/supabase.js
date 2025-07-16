@@ -143,6 +143,39 @@ export const gameAPI = {
     }
   },
 
+  // Получить стоимость доступного приза
+  async getAvailablePrizeValue() {
+    try {
+      // Проверяем настройку Supabase
+      if (supabaseUrl === 'https://your-project.supabase.co') {
+        return 'от 0.5$' // Дефолтное значение для тестирования
+      }
+
+      // Получаем случайный доступный приз
+      const { data: prizes, error } = await supabase
+        .from('prizes')
+        .select('prize_amount')
+        .eq('is_claimed', false)
+        .limit(1)
+      
+      if (error) {
+        console.log('Ошибка получения призов:', error.message)
+        return 'от 0.5$'
+      }
+
+      if (!prizes || prizes.length === 0) {
+        return 'от 0.5$' // Если призов нет, показываем минимальную стоимость
+      }
+
+      // Возвращаем стоимость приза
+      const amount = prizes[0].prize_amount
+      return `${amount}$`
+    } catch (error) {
+      console.log('Ошибка получения стоимости приза:', error.message)
+      return 'от 0.5$'
+    }
+  },
+
   // Получить доступный приз (ИСПРАВЛЕНО)
   async getAvailablePrize(telegramId, sessionId) {
     try {
