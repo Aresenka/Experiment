@@ -763,5 +763,36 @@ export const gameAPI = {
         supporters: []
       }
     }
+  },
+
+  // Убедиться, что игрок существует в базе данных
+  async ensurePlayerExists(telegramId, firstName, username) {
+    try {
+      if (supabaseUrl === 'https://your-project.supabase.co') {
+        console.log('Supabase не настроен, пропускаем создание игрока')
+        return true
+      }
+
+      const { error } = await supabase
+        .from('players')
+        .upsert({
+          telegram_id: telegramId,
+          first_name: firstName,
+          username: username,
+          updated_at: new Date().toISOString()
+        }, {
+          onConflict: 'telegram_id'
+        })
+    
+      if (error) {
+        console.log('Ошибка создания/обновления игрока:', error.message)
+        return false
+      }
+      
+      return true
+    } catch (error) {
+      console.log('Ошибка ensurePlayerExists:', error.message)
+      return false
+    }
   }
 } 

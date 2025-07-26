@@ -719,6 +719,16 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
       if (!isDeviceAllowed) return;
       
       try {
+        // СОЗДАЕМ ИГРОКА ЗАРАНЕЕ (НОВОЕ)
+        if (!isDebugUser) {
+          try {
+            await gameAPI.ensurePlayerExists(user.id, user.first_name, user.username);
+          } catch (error) {
+            console.error('Ошибка создания игрока:', error);
+            // Не критичная ошибка, продолжаем
+          }
+        }
+        
         // Для дебаг пользователя всегда разрешаем бесплатную игру
         if (isDebugUser) {
           setHasFreeTry(true);
