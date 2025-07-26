@@ -8,51 +8,36 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey)
 
 // Функции для работы с игрой
 export const gameAPI = {
-  // Проверить доступность бесплатной попытки
+  // Проверить доступность бесплатной попытки (ИСПРАВЛЕНО - используем RPC)
   async canPlayFree(telegramId) {
     try {
-      // Проверяем подключение к Supabase
       if (supabaseUrl === 'https://your-project.supabase.co') {
         console.log('Supabase не настроен, разрешаем играть')
         return true
       }
 
-      // Используем простую проверку через таблицу БЕЗ .single()
-      const { data: players, error: playerError } = await supabase
-        .from('players')
-        .select('last_free_attempt')
-        .eq('telegram_id', telegramId)
+      // ИСПРАВЛЕНО: Используем RPC функцию для атомарной проверки
+      const { data, error } = await supabase
+        .rpc('can_play_free_secure', { player_telegram_id: telegramId })
       
-      if (playerError) {
-        console.log('Ошибка запроса:', playerError.message)
-        return true
+      if (error) {
+        console.log('Ошибка RPC:', error.message)
+        return false // ИЗМЕНЕНО: по умолчанию запрещаем при ошибке
       }
       
-      // Если игрок не найден или список пустой
-      if (!players || players.length === 0) {
-        return true // Новый игрок - разрешаем играть
-      }
-      
-      const player = players[0]
-      if (!player.last_free_attempt) {
-        return true
-      }
-      
-      const lastAttempt = new Date(player.last_free_attempt)
-      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000)
-      return lastAttempt < oneHourAgo
+      return data === true
     } catch (error) {
       console.log('Ошибка проверки бесплатной попытки:', error.message)
-      return true
+      return false // ИЗМЕНЕНО: по умолчанию запрещаем при ошибке
     }
   },
 
-  // Зарегистрировать новую попытку
+  // Зарегистрировать новую попытку (ИСПРАВЛЕНО - только через RPC)
   async registerAttempt(telegramId, firstName, username, isFree = true) {
     try {
-      // Сначала попробуем использовать RPC функцию
+      // ИСПРАВЛЕНО: Обязательно используем RPC функцию
       const { data, error } = await supabase
-        .rpc('register_attempt', {
+        .rpc('register_attempt_secure', {
           player_telegram_id: telegramId,
           player_first_name: firstName,
           player_username: username,
@@ -60,47 +45,14 @@ export const gameAPI = {
         })
       
       if (error) {
-        console.log('RPC функция недоступна, используем fallback:', error.message)
-        // Fallback: создаем игрока и сессию вручную
-        const sessionId = Math.random().toString(36).substring(7)
-        
-        // Попробуем создать/обновить игрока
-        try {
-          await supabase
-            .from('players')
-            .upsert({
-              telegram_id: telegramId,
-              first_name: firstName,
-              username: username,
-              last_free_attempt: isFree ? new Date().toISOString() : undefined
-            }, {
-              onConflict: 'telegram_id'
-            })
-        } catch (playerError) {
-          console.log('Не удалось создать игрока:', playerError.message)
-        }
-        
-        // Попробуем создать сессию
-        try {
-          await supabase
-            .from('game_sessions')
-            .insert({
-              id: sessionId,
-              telegram_id: telegramId,
-              was_free_attempt: isFree,
-              started_at: new Date().toISOString()
-            })
-        } catch (sessionError) {
-          console.log('Не удалось создать сессию:', sessionError.message)
-        }
-        
-        return sessionId
+        console.log('Ошибка регистрации попытки:', error.message)
+        return null // ИЗМЕНЕНО: возвращаем null при ошибке
       }
       
       return data
     } catch (error) {
       console.log('Ошибка регистрации попытки:', error.message)
-      return Math.random().toString(36).substring(7) // Временный ID
+      return null
     }
   },
 
@@ -176,100 +128,32 @@ export const gameAPI = {
     }
   },
 
-  // Получить доступный приз (ИСПРАВЛЕНО)
-  async getAvailablePrize(telegramId, sessionId) {
+  // Получить доступный приз (ИСПРАВЛЕНО - усиленная валидация)
+  async getAvailablePrize(telegramId, sessionId, gameData = {}) {
     try {
-      // Проверяем настройку Supabase
       if (supabaseUrl === 'https://your-project.supabase.co') {
         console.log('Supabase не настроен, возвращаем тестовую ссылку')
         return 'https://example.com/demo-prize'
       }
 
-      // 1. Проверяем статус игровой сессии
-      const { data: session, error: sessionError } = await supabase
-        .from('game_sessions')
-        .select('is_won, was_free_attempt, telegram_id')
-        .eq('id', sessionId)
-        .single()
-      
-      if (sessionError || !session) {
-        console.log('Сессия не найдена:', sessionError?.message)
-        return null
-      }
-
-      // 2. Проверяем, что это победная сессия
-      if (!session.is_won) {
-        console.log('Игрок не выиграл в этой сессии')
-        return null
-      }
-
-      // 3. Если игра была платной, проверяем статус платежа
-      if (!session.was_free_attempt) {
-        const { data: payment, error: paymentError } = await supabase
-          .from('payments')
-          .select('status')
-          .eq('telegram_id', telegramId)
-          .eq('status', 'paid')
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .single()
-        
-        if (paymentError || !payment) {
-          console.log('Платеж не найден или не подтвержден:', paymentError?.message)
-          return null
-        }
-      }
-
-      // 4. Пытаемся получить приз через RPC функцию
-      try {
-        const { data: prizeLink, error: rpcError } = await supabase
-          .rpc('get_available_prize')
-        
-        if (!rpcError && prizeLink) {
-          console.log('Приз получен через RPC:', prizeLink)
-          return prizeLink
-        }
-        
-        console.log('RPC не вернул приз:', rpcError?.message)
-      } catch (rpcError) {
-        console.log('RPC функция выдала ошибку:', rpcError.message)
-      }
-
-      // 5. Fallback: работаем с таблицей напрямую
-      console.log('Используем fallback - прямое обращение к таблице')
-      const { data: prize, error: prizeError } = await supabase
-        .from('prizes')
-        .select('id, prize_link')
-        .eq('is_claimed', false)
-        .order('created_at', { ascending: true })
-        .limit(1)
-        .single()
-      
-      if (prizeError || !prize) {
-        console.log('Нет доступных призов:', prizeError?.message)
-        return 'https://example.com/demo-prize' // Возвращаем заглушку если призы закончились
-      }
-
-      // 6. Отмечаем приз как использованный
-      const { error: updateError } = await supabase
-        .from('prizes')
-        .update({ 
-          is_claimed: true, 
-          claimed_by: telegramId,
-          claimed_at: new Date().toISOString()
+      // ИСПРАВЛЕНО: Используем специальную RPC функцию с полной валидацией
+      const { data: prizeLink, error } = await supabase
+        .rpc('get_prize_secure', {
+          player_telegram_id: telegramId,
+          session_id: sessionId,
+          game_data: gameData
         })
-        .eq('id', prize.id)
       
-      if (updateError) {
-        console.log('Ошибка обновления приза:', updateError.message)
+      if (error) {
+        console.log('Ошибка получения приза:', error.message)
+        return null
       }
-
-      console.log('Приз выдан:', prize.prize_link)
-      return prize.prize_link
+      
+      return prizeLink
       
     } catch (error) {
       console.log('Ошибка получения приза:', error.message)
-      return 'https://example.com/demo-prize'
+      return null
     }
   },
 

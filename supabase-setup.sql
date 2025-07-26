@@ -174,6 +174,156 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- ДОБАВЛЕНО: Безопасная функция проверки бесплатной попытки
+CREATE OR REPLACE FUNCTION can_play_free_secure(player_telegram_id BIGINT)
+RETURNS BOOLEAN 
+SECURITY DEFINER
+AS $$
+DECLARE
+  last_attempt TIMESTAMP WITH TIME ZONE;
+  recent_attempts INTEGER;
+BEGIN
+  -- Проверяем количество попыток за последнюю минуту (защита от спама)
+  SELECT COUNT(*) INTO recent_attempts
+  FROM game_sessions 
+  WHERE telegram_id = player_telegram_id 
+    AND started_at > NOW() - INTERVAL '1 minute';
+  
+  IF recent_attempts >= 3 THEN
+    RETURN FALSE;
+  END IF;
+  
+  -- Основная проверка бесплатной попытки
+  SELECT last_free_attempt INTO last_attempt 
+  FROM players 
+  WHERE telegram_id = player_telegram_id;
+  
+  RETURN (last_attempt IS NULL OR last_attempt < NOW() - INTERVAL '1 hour');
+END;
+$$ LANGUAGE plpgsql;
+
+-- ДОБАВЛЕНО: Безопасная функция регистрации попытки
+CREATE OR REPLACE FUNCTION register_attempt_secure(
+  player_telegram_id BIGINT,
+  player_first_name TEXT DEFAULT NULL,
+  player_username TEXT DEFAULT NULL,
+  is_free BOOLEAN DEFAULT TRUE
+)
+RETURNS UUID AS $$
+DECLARE
+  session_id UUID;
+  can_play BOOLEAN;
+BEGIN
+  -- Если бесплатная попытка, проверяем доступность
+  IF is_free THEN
+    SELECT can_play_free_secure(player_telegram_id) INTO can_play;
+    IF NOT can_play THEN
+      RAISE EXCEPTION 'Бесплатная попытка недоступна';
+    END IF;
+  END IF;
+  
+  -- Создаем или обновляем игрока
+  INSERT INTO players (telegram_id, first_name, username, last_free_attempt, total_attempts)
+  VALUES (player_telegram_id, player_first_name, player_username, 
+          CASE WHEN is_free THEN NOW() ELSE NULL END, 1)
+  ON CONFLICT (telegram_id) 
+  DO UPDATE SET 
+    first_name = COALESCE(EXCLUDED.first_name, players.first_name),
+    username = COALESCE(EXCLUDED.username, players.username),
+    last_free_attempt = CASE WHEN is_free THEN NOW() ELSE players.last_free_attempt END,
+    total_attempts = players.total_attempts + 1,
+    updated_at = NOW();
+  
+  -- Создаем игровую сессию
+  INSERT INTO game_sessions (telegram_id, was_free_attempt)
+  VALUES (player_telegram_id, is_free)
+  RETURNING id INTO session_id;
+  
+  RETURN session_id;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ДОБАВЛЕНО: Безопасная функция получения приза
+CREATE OR REPLACE FUNCTION get_prize_secure(
+  player_telegram_id BIGINT,
+  session_id UUID,
+  game_data JSONB DEFAULT '{}'::JSONB
+)
+RETURNS TEXT 
+SECURITY DEFINER
+AS $$
+DECLARE
+  result_prize_link TEXT;
+  prize_id UUID;
+  session_won BOOLEAN;
+  session_exists BOOLEAN;
+  already_claimed BOOLEAN;
+  was_free_attempt BOOLEAN;
+  payment_exists BOOLEAN;
+BEGIN
+  -- 1. Проверяем существование и статус сессии
+  SELECT is_won, was_free_attempt INTO session_won, was_free_attempt
+  FROM game_sessions 
+  WHERE id = session_id AND telegram_id = player_telegram_id;
+  
+  session_exists := FOUND;
+  
+  IF NOT session_exists THEN
+    RAISE EXCEPTION 'Сессия не найдена или не принадлежит игроку';
+  END IF;
+  
+  IF NOT session_won THEN
+    RAISE EXCEPTION 'Игрок не выиграл в этой сессии';
+  END IF;
+  
+  -- 2. Проверяем, не был ли уже получен приз для этой сессии
+  SELECT EXISTS(
+    SELECT 1 FROM prizes 
+    WHERE claimed_by = player_telegram_id 
+      AND claimed_at > (SELECT started_at FROM game_sessions WHERE id = session_id)
+  ) INTO already_claimed;
+  
+  IF already_claimed THEN
+    RAISE EXCEPTION 'Приз для этой сессии уже был получен';
+  END IF;
+  
+  -- 3. Если игра была платной, проверяем статус платежа
+  IF NOT was_free_attempt THEN
+    SELECT EXISTS(
+      SELECT 1 FROM payments 
+      WHERE telegram_id = player_telegram_id 
+        AND status = 'paid'
+        AND created_at > NOW() - INTERVAL '1 hour'
+    ) INTO payment_exists;
+    
+    IF NOT payment_exists THEN
+      RAISE EXCEPTION 'Платеж не найден или не подтвержден';
+    END IF;
+  END IF;
+  
+  -- 4. Ищем первый доступный приз
+  SELECT id, prize_link INTO prize_id, result_prize_link
+  FROM prizes 
+  WHERE is_claimed = FALSE 
+  ORDER BY created_at ASC 
+  LIMIT 1;
+  
+  IF prize_id IS NULL THEN
+    RETURN 'https://example.com/demo-prize';
+  END IF;
+  
+  -- 5. Отмечаем приз как использованный
+  UPDATE prizes 
+  SET 
+    is_claimed = TRUE, 
+    claimed_by = player_telegram_id,
+    claimed_at = NOW()
+  WHERE id = prize_id;
+  
+  RETURN result_prize_link;
+END;
+$$ LANGUAGE plpgsql;
+
 -- 10. RLS (Row Level Security) политики
 ALTER TABLE players ENABLE ROW LEVEL SECURITY;
 ALTER TABLE game_sessions ENABLE ROW LEVEL SECURITY;

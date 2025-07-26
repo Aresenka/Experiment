@@ -112,6 +112,9 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
   // ДОБАВЛЯЕМ новые состояния для защиты от повторного получения приза
   const [isPrizeClaimed, setIsPrizeClaimed] = useState(false);
   const [isClaimingPrize, setIsClaimingPrize] = useState(false);
+  const [prizeClaimAttempts, setPrizeClaimAttempts] = useState(0); // НОВОЕ: счетчик попыток
+  const [lastActionTime, setLastActionTime] = useState(0); // НОВОЕ: защита от спама
+  const [showMap, setShowMap] = useState(false); // Состояние для показа/скрытия карты
 
   // Проверка доступных направлений
   const getAvailableDirections = useCallback((): Direction[] => {
@@ -170,29 +173,39 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     }
   }, [currentSessionId, user?.id, gameStartTime]); // Убрали playerPos и stepCount
 
-  // Получение приза (ИСПРАВЛЕНО - защита от повторных вызовов)
+  // Получение приза (ИСПРАВЛЕНО - усиленная защита от повторных вызовов)
   const claimPrize = useCallback(async () => {
-    // Защита от повторных вызовов
-    if (isPrizeClaimed || isClaimingPrize || !user?.id || !currentSessionId) {
+    // Усиленная защита от повторных вызовов
+    if (isPrizeClaimed || isClaimingPrize || !user?.id || !currentSessionId || prizeClaimAttempts >= 3) {
+      if (prizeClaimAttempts >= 3) {
+        alert('❌ Превышено количество попыток получения приза. Обратитесь в поддержку.');
+      }
       return;
     }
 
     setIsClaimingPrize(true);
+    setPrizeClaimAttempts(prev => prev + 1);
 
     try {
-      // Передаем ID пользователя и сессии для проверки
-      const prizeLink = await gameAPI.getAvailablePrize(user.id, currentSessionId);
+      // Добавляем дополнительную задержку для предотвращения спама
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // Передаем дополнительные параметры для валидации
+      const prizeLink = await gameAPI.getAvailablePrize(user.id, currentSessionId, {
+        gameState: gameState,
+        timeLeft: timeLeft,
+        stepCount: stepCount,
+        attemptNumber: prizeClaimAttempts
+      });
       
       if (prizeLink && prizeLink !== 'https://example.com/demo-prize') {
-        // Отмечаем приз как полученный ПЕРЕД открытием ссылки
         setIsPrizeClaimed(true);
-        // Перенаправляем на реальный приз
         window.open(prizeLink, '_blank');
       } else if (prizeLink === 'https://example.com/demo-prize') {
         setIsPrizeClaimed(true);
         alert('🎉 Поздравляем с победой!\n\n⚠️ К сожалению, реальные призы временно закончились, но ваша победа засчитана!\n\nСледите за обновлениями - скоро добавим новые призы!');
       } else {
-        alert('❌ Ошибка: Приз недоступен.\n\nВозможные причины:\n• Платеж не подтвержден\n• Сессия не найдена\n• Технические неполадки\n\nОбратитесь в поддержку.');
+        alert('❌ Ошибка: Приз недоступен.\n\nВозможные причины:\n• Приз уже был получен\n• Сессия невалидна\n• Технические неполадки\n\nОбратитесь в поддержку.');
       }
     } catch (error) {
       console.error('Ошибка получения приза:', error);
@@ -200,7 +213,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     } finally {
       setIsClaimingPrize(false);
     }
-  }, [user?.id, currentSessionId, isPrizeClaimed, isClaimingPrize]);
+  }, [user?.id, currentSessionId, isPrizeClaimed, isClaimingPrize, prizeClaimAttempts, gameState, timeLeft, stepCount]);
 
   // Проверка победы после каждого хода
   useEffect(() => {
@@ -341,8 +354,16 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     }
   }, [cooldownTime, hasFreeTry, isDebugUser]);
 
-  // Инициализация игры (ДОПОЛНЕНО - сброс состояния приза)
+  // Инициализация игры (ДОПОЛНЕНО - сброс счетчика попыток)
   const startGame = useCallback(async (isFree = true) => {
+    // ДОБАВЛЕНО: защита от спама
+    const now = Date.now();
+    if (now - lastActionTime < 1000) { // 1 секунда между стартами игр
+      alert('⏱️ Подождите немного между играми');
+      return;
+    }
+    setLastActionTime(now);
+    
     if (!user?.id) {
       console.error('Пользователь не найден');
       return;
@@ -351,12 +372,23 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     // Сбрасываем состояние приза при старте новой игры
     setIsPrizeClaimed(false);
     setIsClaimingPrize(false);
+    setPrizeClaimAttempts(0); // НОВОЕ: сбрасываем счетчик
+    setShowMap(false); // Сбрасываем показ карты
 
     try {
+      // Добавляем дополнительную проверку перед стартом
+      if (isFree && !isDebugUser) {
+        const canPlay = await gameAPI.canPlayFree(user.id);
+        if (!canPlay) {
+          alert('❌ Бесплатная попытка недоступна. Подождите окончания кулдауна.');
+          return;
+        }
+      }
+
       // Для дебаг пользователя не регистрируем попытки в БД
       let sessionId;
       if (isDebugUser) {
-        sessionId = `debug_${Date.now()}`;
+        sessionId = crypto.randomUUID();
       } else {
         // Регистрируем попытку в базе данных
         sessionId = await gameAPI.registerAttempt(
@@ -367,7 +399,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
         );
         
         if (!sessionId) {
-          console.error('Не удалось зарегистрировать попытку');
+          alert('❌ Не удалось зарегистрировать попытку. Попробуйте позже.');
           return;
         }
       }
@@ -405,10 +437,18 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     } catch (error) {
       console.error('Ошибка старта игры:', error);
     }
-  }, [user, isDebugUser]);
+  }, [user, isDebugUser, lastActionTime]);
   
   // Функция оплаты в звёздах
   const buyAttempt = useCallback(async () => {
+    // ДОБАВЛЕНО: защита от спама
+    const now = Date.now();
+    if (now - lastActionTime < 2000) { // 2 секунды между действиями
+      alert('⏱️ Подождите немного между действиями');
+      return;
+    }
+    setLastActionTime(now);
+    
     if (isPaymentProcessing || !user?.id) return;
     
     setIsPaymentProcessing(true);
@@ -481,7 +521,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
         WebApp.showAlert('Ошибка создания платежа. Попробуйте позже.');
       }
     }
-  }, [isPaymentProcessing, user, startGame]);
+  }, [isPaymentProcessing, user, startGame, lastActionTime]);
   
   // Обработчики событий
   useEffect(() => {
@@ -657,6 +697,71 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
           <div>Расстояние до приза: {Math.abs(prizePos.x - playerPos.x) + Math.abs(prizePos.y - playerPos.y)} шагов</div>
           <div>Стартовая позиция: ({playerPos.x}, {playerPos.y})</div>
           <div>Позиция приза: ({prizePos.x}, {prizePos.y})</div>
+        </div>
+      </div>
+    );
+  };
+
+  // Компонент карты лабиринта для экрана конца игры
+  const EndGameMazeView = () => {
+    if (maze.length === 0) return null;
+    
+    const cellSize = Math.min(Math.floor(280 / maze.length), 18);
+    const mapBgColor = theme === 'dark' ? 'bg-gray-800' : 'bg-gray-100';
+    const mapBorderColor = theme === 'dark' ? 'border-gray-600' : 'border-gray-300';
+    const wallColor = theme === 'dark' ? 'bg-gray-700' : 'bg-gray-400';
+    const pathColor = theme === 'dark' ? 'bg-gray-200' : 'bg-white';
+    const infoTextColor = theme === 'dark' ? 'text-gray-300' : 'text-gray-600';
+    
+    return (
+      <div className={`flex flex-col items-center mb-6 p-4 ${mapBgColor} rounded-lg ${mapBorderColor} border`}>
+        <h3 className={`text-sm font-bold mb-3 text-center ${textColor}`}>🗺️ Карта лабиринта</h3>
+        <div 
+          className={`mx-auto grid ${mapBorderColor} border`}
+          style={{ 
+            gridTemplateColumns: `repeat(${maze[0]?.length || 0}, ${cellSize}px)`,
+            width: 'fit-content'
+          }}
+        >
+          {maze.map((row, y) =>
+            row.map((cell, x) => {
+              const isPlayer = playerPos.x === x && playerPos.y === y;
+              const isPrize = prizePos.x === x && prizePos.y === y;
+              const isWall = cell === 1;
+              
+              let bgColor = isWall ? wallColor : pathColor;
+              let content = '';
+              
+              if (isPlayer) {
+                bgColor = 'bg-blue-500';
+                content = '🚶';
+              } else if (isPrize) {
+                bgColor = 'bg-green-500';
+                content = '🎁';
+              }
+              
+              return (
+                <div
+                  key={`${x}-${y}`}
+                  className={`${bgColor} ${mapBorderColor} border flex items-center justify-center text-xs`}
+                  style={{ 
+                    width: `${cellSize}px`, 
+                    height: `${cellSize}px`,
+                    fontSize: `${Math.max(cellSize - 6, 8)}px`
+                  }}
+                >
+                  {content}
+                </div>
+              );
+            })
+          )}
+        </div>
+        <div className={`text-xs mt-3 ${infoTextColor} text-center space-y-1`}>
+          <div>📍 Расстояние до приза: {Math.abs(prizePos.x - playerPos.x) + Math.abs(prizePos.y - playerPos.y)} шагов</div>
+          <div className="flex justify-center gap-4">
+            <span>🚶 Ваша позиция</span>
+            <span>🎁 Приз</span>
+          </div>
         </div>
       </div>
     );
@@ -852,7 +957,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
   if (gameState === 'won') {
     return (
       <div className={`min-h-screen ${bgColor} ${textColor} flex flex-col justify-center items-center p-4`}>
-        <div className="text-center">
+        <div className="text-center max-w-md w-full">
           <div className="text-6xl mb-4">🎉</div>
           <h1 className="text-3xl font-bold mb-4">Поздравляем!</h1>
           <p className="text-lg mb-2">Вы нашли приз!</p>
@@ -860,6 +965,18 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
             За {GAME_SETTINGS.GAME_TIME - timeLeft} секунд и {stepCount} шагов
           </p>
           <p className="text-2xl font-bold text-green-500 mb-8">💰 {prizeValue}</p>
+          
+          {/* Кнопка показа карты и сама карта */}
+          <button
+            onClick={() => setShowMap(!showMap)}
+            className={`w-full mb-4 py-2 px-4 rounded-lg text-sm font-medium ${
+              theme === 'dark' ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
+            } ${textColor} transition-colors`}
+          >
+            {showMap ? '🗺️ Скрыть карту' : '🗺️ Показать карту'}
+          </button>
+          
+          {showMap && <EndGameMazeView />}
           
           {/* Показываем статус получения приза */}
           {isPrizeClaimed && (
@@ -927,13 +1044,25 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
   if (gameState === 'lost') {
     return (
       <div className={`min-h-screen ${bgColor} ${textColor} flex flex-col justify-center items-center p-4`}>
-        <div className="text-center">
+        <div className="text-center max-w-md w-full">
           <div className="text-6xl mb-4">⏰</div>
           <h1 className="text-3xl font-bold mb-4">Время вышло!</h1>
           <p className="text-lg mb-2">Вы сделали {stepCount} шагов</p>
           <p className="text-sm opacity-75 mb-6">
             Приз был в {Math.abs(prizePos.x - playerPos.x) + Math.abs(prizePos.y - playerPos.y)} шагах от вас
           </p>
+          
+          {/* Кнопка показа карты и сама карта */}
+          <button
+            onClick={() => setShowMap(!showMap)}
+            className={`w-full mb-4 py-2 px-4 rounded-lg text-sm font-medium ${
+              theme === 'dark' ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
+            } ${textColor} transition-colors`}
+          >
+            {showMap ? '🗺️ Скрыть карту' : '🗺️ Показать карту'}
+          </button>
+          
+          {showMap && <EndGameMazeView />}
           
           <div className="space-y-4">
             {!isDebugUser && (
