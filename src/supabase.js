@@ -244,11 +244,10 @@ export const gameAPI = {
         .from('players')
         .select('last_free_attempt')
         .eq('telegram_id', telegramId)
-        .single()
       
-      if (error || !data?.last_free_attempt) return 0
+      if (error || !data || data.length === 0 || !data[0]?.last_free_attempt) return 0
       
-      const lastAttempt = new Date(data.last_free_attempt)
+      const lastAttempt = new Date(data[0].last_free_attempt)
       const nextFree = new Date(lastAttempt.getTime() + 60 * 60 * 1000) // +1 час
       const now = new Date()
       
@@ -342,6 +341,427 @@ export const gameAPI = {
     } catch (error) {
       console.log('Ошибка проверки платежа:', error.message)
       return false
+    }
+  },
+
+  // ========== МЕТОДЫ ДЛЯ ТРЕНИРОВОЧНОГО РЕЖИМА ==========
+
+  // Зарегистрировать тренировочную сессию
+  async registerTrainingSession(telegramId, firstName, username) {
+    try {
+      if (supabaseUrl === 'https://your-project.supabase.co') {
+        console.log('Supabase не настроен, возвращаем тестовый sessionId')
+        return `training_test_${Date.now()}`
+      }
+
+      // Создаем или обновляем игрока
+      const { error: playerError } = await supabase
+        .from('players')
+        .upsert({
+          telegram_id: telegramId,
+          first_name: firstName,
+          username: username,
+          updated_at: new Date().toISOString()
+        }, {
+          onConflict: 'telegram_id'
+        })
+      
+      if (playerError) {
+        console.log('Ошибка создания/обновления игрока:', playerError.message)
+        return `training_error_player_${Date.now()}`
+      }
+
+      // Создаем тренировочную сессию
+      const { data, error } = await supabase
+        .from('training_results')
+        .insert({
+          telegram_id: telegramId,
+          started_at: new Date().toISOString()
+        })
+        .select('id')
+        .single()
+      
+      if (error) {
+        console.log('Ошибка создания тренировочной сессии:', error.message)
+        return `training_fallback_${Date.now()}`
+      }
+      
+      return data.id
+    } catch (error) {
+      console.log('Ошибка регистрации тренировочной сессии:', error.message)
+      return `training_error_${Date.now()}`
+    }
+  },
+
+  // Завершить тренировочную сессию
+  async finishTrainingSession(sessionId, won, steps, timeSpent, finalPosition, exitPosition) {
+    try {
+      if (sessionId.startsWith('training_test_') || sessionId.startsWith('training_fallback_') || sessionId.startsWith('training_error_')) {
+        console.log('Тестовая сессия, не сохраняем в БД')
+        return true
+      }
+
+      // Обновляем результат тренировки
+      const { data: trainingResult, error: trainingError } = await supabase
+        .from('training_results')
+        .update({
+          finished_at: new Date().toISOString(),
+          is_won: won,
+          steps_taken: steps,
+          time_spent: timeSpent,
+          final_position: finalPosition,
+          exit_position: exitPosition
+        })
+        .eq('id', sessionId)
+        .select('telegram_id')
+        .single()
+      
+      if (trainingError) {
+        console.log('Ошибка обновления тренировочной сессии:', trainingError.message)
+        return false
+      }
+
+      // ИСПРАВЛЕНО: правильно извлекаем telegram_id из результата запроса
+      const telegramId = trainingResult?.telegram_id
+      if (!telegramId) {
+        console.log('Не удалось получить telegram_id из тренировочной сессии')
+        return false
+      }
+
+      // Получаем текущую статистику игрока
+      const { data: players, error: playerSelectError } = await supabase
+        .from('players')
+        .select('total_training_attempts, total_training_wins, best_training_steps, best_training_time')
+        .eq('telegram_id', telegramId)
+      
+      if (playerSelectError) {
+        console.log('Ошибка получения статистики игрока:', playerSelectError.message)
+        return false
+      }
+
+      // Если игрок не найден, создаем его
+      let player
+      if (!players || players.length === 0) {
+        console.log('Игрок не найден, создаем новую запись...')
+        const { data: newPlayer, error: createError } = await supabase
+          .from('players')
+          .insert({
+            telegram_id: telegramId,
+            total_training_attempts: 0,
+            total_training_wins: 0,
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          })
+          .select('total_training_attempts, total_training_wins, best_training_steps, best_training_time')
+          .single()
+        
+        if (createError) {
+          console.log('Ошибка создания игрока:', createError.message)
+          return false
+        }
+        player = newPlayer
+      } else {
+        player = players[0]
+      }
+
+      // Готовим обновления
+      const updates = {
+        total_training_attempts: (player.total_training_attempts || 0) + 1,
+        updated_at: new Date().toISOString()
+      }
+
+      // Если победа - обновляем статистику побед и лучшие результаты  
+      if (won) {
+        updates.total_training_wins = (player.total_training_wins || 0) + 1
+        
+        // Обновляем лучшие результаты
+        if (!player.best_training_steps || steps < player.best_training_steps) {
+          updates.best_training_steps = steps
+        }
+        if (!player.best_training_time || timeSpent < player.best_training_time) {
+          updates.best_training_time = timeSpent
+        }
+      }
+
+      // ИСПРАВЛЕНО: обновляем статистику игрока
+      const { error: playerUpdateError } = await supabase
+        .from('players')
+        .update(updates)
+        .eq('telegram_id', telegramId)
+      
+      if (playerUpdateError) {
+        console.log('Ошибка обновления статистики игрока:', playerUpdateError.message)
+        return false
+      }
+      
+      return true
+    } catch (error) {
+      console.log('Ошибка завершения тренировочной сессии:', error.message)
+      return false
+    }
+  },
+
+  // Получить статистику тренировок игрока
+  async getTrainingStats(telegramId) {
+    try {
+      const { data: players, error: playerError } = await supabase
+        .from('players')
+        .select(`
+          total_training_attempts,
+          total_training_wins,
+          best_training_steps,
+          best_training_time,
+          total_donated_stars
+        `)
+        .eq('telegram_id', telegramId)
+      
+      if (playerError || !players || players.length === 0) {
+        console.log('Игрок не найден:', playerError?.message || 'Нет данных')
+        return {
+          total_attempts: 0,
+          total_wins: 0,
+          best_steps: null,
+          best_time: null,
+          win_rate: 0,
+          support_level: 0
+        }
+      }
+      
+      const player = players[0]
+      
+      const winRate = player.total_training_attempts > 0 
+        ? Math.round((player.total_training_wins / player.total_training_attempts) * 100)
+        : 0
+      
+      return {
+        total_attempts: player.total_training_attempts || 0,
+        total_wins: player.total_training_wins || 0,
+        best_steps: player.best_training_steps,
+        best_time: player.best_training_time,
+        win_rate: winRate,
+        support_level: player.total_donated_stars || 0
+      }
+    } catch (error) {
+      console.log('Ошибка получения статистики тренировок:', error.message)
+      return {
+        total_attempts: 0,
+        total_wins: 0,
+        best_steps: null,
+        best_time: null,
+        win_rate: 0,
+        support_level: 0
+      }
+    }
+  },
+
+  // ========== МЕТОДЫ ДЛЯ ДОНАТОВ ==========
+
+  // Создать инвойс для доната
+  async createDonationInvoice(telegramId, userName, amountStars) {
+    try {
+      if (supabaseUrl === 'https://your-project.supabase.co') {
+        console.log('Supabase не настроен, возвращаем тестовую ссылку')
+        return {
+          invoice_url: 'https://t.me/invoice/test',
+          payload: `test_donation_${telegramId}_${amountStars}_${Date.now()}`,
+          amount_stars: amountStars
+        }
+      }
+
+      const { data, error } = await supabase.functions.invoke('create-donation', {
+        body: {
+          telegram_id: telegramId,
+          user_name: userName,
+          amount_stars: amountStars
+        }
+      })
+      
+      if (error) {
+        console.log('Ошибка создания инвойса доната:', error.message)
+        return {
+          invoice_url: 'https://t.me/invoice/test',
+          payload: `fallback_donation_${telegramId}_${amountStars}_${Date.now()}`,
+          amount_stars: amountStars
+        }
+      }
+      
+      return data
+    } catch (error) {
+      console.log('Ошибка создания инвойса доната:', error.message)
+      return {
+        invoice_url: 'https://t.me/invoice/test',
+        payload: `error_donation_${telegramId}_${amountStars}_${Date.now()}`,
+        amount_stars: amountStars
+      }
+    }
+  },
+
+  // Проверить и записать донат
+  async verifyAndRecordDonation(telegramId, payload, amountStars) {
+    try {
+      if (supabaseUrl === 'https://your-project.supabase.co') {
+        console.log('Supabase не настроен, симулируем успешный донат')
+        return true
+      }
+
+      const { data, error } = await supabase.functions.invoke('verify-donation', {
+        body: {
+          telegram_id: telegramId,
+          payload: payload,
+          amount_stars: amountStars
+        }
+      })
+      
+      if (error) {
+        console.log('Ошибка проверки доната:', error.message)
+        return false
+      }
+      
+      return data?.status === 'success' || data?.status === 'already_exists'
+    } catch (error) {
+      console.log('Ошибка проверки доната:', error.message)
+      return false
+    }
+  },
+
+  // ========== МЕТОДЫ ДЛЯ ЛИДЕРБОРДОВ ==========
+
+  // Получить лидерборд по лучшим шагам
+  async getLeaderboardBestSteps(limit = 10) {
+    try {
+      const { data, error } = await supabase
+        .from('leaderboard_best_steps')
+        .select('*')
+        .limit(limit)
+      
+      if (error) {
+        console.log('Ошибка получения лидерборда по шагам:', error.message)
+        return []
+      }
+      
+      return data || []
+    } catch (error) {
+      console.log('Ошибка получения лидерборда по шагам:', error.message)
+      return []
+    }
+  },
+
+  // Получить лидерборд по лучшему времени
+  async getLeaderboardBestTime(limit = 10) {
+    try {
+      const { data, error } = await supabase
+        .from('leaderboard_best_time')
+        .select('*')
+        .limit(limit)
+      
+      if (error) {
+        console.log('Ошибка получения лидерборда по времени:', error.message)
+        return []
+      }
+      
+      return data || []
+    } catch (error) {
+      console.log('Ошибка получения лидерборда по времени:', error.message)
+      return []
+    }
+  },
+
+  // Получить лидерборд по винрейту
+  async getLeaderboardWinRate(limit = 10) {
+    try {
+      const { data, error } = await supabase
+        .from('leaderboard_win_rate')
+        .select('*')
+        .limit(limit)
+      
+      if (error) {
+        console.log('Ошибка получения лидерборда по винрейту:', error.message)
+        return []
+      }
+      
+      return data || []
+    } catch (error) {
+      console.log('Ошибка получения лидерборда по винрейту:', error.message)
+      return []
+    }
+  },
+
+  // Получить лидерборд по поддержке проекта
+  async getLeaderboardSupporters(limit = 10) {
+    try {
+      const { data, error } = await supabase
+        .from('leaderboard_supporters')
+        .select('*')
+        .limit(limit)
+      
+      if (error) {
+        console.log('Ошибка получения лидерборда по поддержке:', error.message)
+        return []
+      }
+      
+      return data || []
+    } catch (error) {
+      console.log('Ошибка получения лидерборда по поддержке:', error.message)
+      return []
+    }
+  },
+
+  // ОПТИМИЗИРОВАННЫЙ МЕТОД: Получить все лидерборды одним запросом
+  async getAllLeaderboards(limit = 20) {
+    try {
+      if (supabaseUrl === 'https://your-project.supabase.co') {
+        console.log('Supabase не настроен, возвращаем пустые лидерборды')
+        return {
+          steps: [],
+          time: [],
+          winrate: [],
+          supporters: []
+        }
+      }
+
+      // Делаем все запросы параллельно для максимальной скорости
+      const [stepsResult, timeResult, winrateResult, supportersResult] = await Promise.all([
+        supabase
+          .from('leaderboard_best_steps')
+          .select('*')
+          .limit(limit),
+        supabase
+          .from('leaderboard_best_time')
+          .select('*')
+          .limit(limit),
+        supabase
+          .from('leaderboard_win_rate')
+          .select('*')
+          .limit(limit),
+        supabase
+          .from('leaderboard_supporters')
+          .select('*')
+          .limit(limit)
+      ])
+
+      // Проверяем ошибки и возвращаем данные
+      const result = {
+        steps: stepsResult.error ? [] : (stepsResult.data || []),
+        time: timeResult.error ? [] : (timeResult.data || []),
+        winrate: winrateResult.error ? [] : (winrateResult.data || []),
+        supporters: supportersResult.error ? [] : (supportersResult.data || [])
+      }
+
+      // Логируем ошибки если есть
+      if (stepsResult.error) console.log('Ошибка лидерборда по шагам:', stepsResult.error.message)
+      if (timeResult.error) console.log('Ошибка лидерборда по времени:', timeResult.error.message)
+      if (winrateResult.error) console.log('Ошибка лидерборда по винрейту:', winrateResult.error.message)
+      if (supportersResult.error) console.log('Ошибка лидерборда по поддержке:', supportersResult.error.message)
+
+      return result
+    } catch (error) {
+      console.log('Ошибка получения всех лидербордов:', error.message)
+      return {
+        steps: [],
+        time: [],
+        winrate: [],
+        supporters: []
+      }
     }
   }
 } 

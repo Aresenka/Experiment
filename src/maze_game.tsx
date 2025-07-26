@@ -9,7 +9,8 @@ interface Position {
 }
 
 type Direction = 'up' | 'down' | 'left' | 'right';
-type GameState = 'menu' | 'playing' | 'won' | 'lost';
+type GameState = 'menu' | 'playing' | 'won' | 'lost' | 'leaderboards' | 'donations';
+type GameMode = 'training' | 'real';
 
 interface MazeGameProps {
   user?: any;
@@ -57,15 +58,64 @@ const generateMaze = (width = 17, height = 17): number[][] => {
 };
 
 
-
 const MazeGame = ({ user, theme }: MazeGameProps) => {
   // Список дебаг пользователей (вы + партнеры)
   const DEBUG_USER_IDS = [
-    379502446,  // @Scilef
+    // 379502446,  // @Scilef
     282577511, //@Wezekable
     // 409022180 //@mdakekv
   ];
+  // Список пользователей, которым разрешено играть с ПК (для разработки)
+  // Чтобы добавить себя: раскомментируйте строку ниже и замените на свой Telegram ID
+  const ALLOW_PC_PLAY: number[] = [
+    379502446, // @Scilef
+  ];
   const isDebugUser = user?.id && DEBUG_USER_IDS.includes(user.id);
+
+  // Вспомогательная функция для проверки мобильного устройства через браузер
+  const checkBrowserMobileDevice = useCallback(() => {
+    // Проверяем User Agent
+    const userAgent = navigator.userAgent.toLowerCase();
+    const mobileKeywords = ['android', 'iphone', 'ipad', 'ipod', 'blackberry', 'windows phone', 'mobile', 'tablet'];
+    const hasMobileUA = mobileKeywords.some(keyword => userAgent.includes(keyword));
+    
+    // Проверяем размер экрана (мобильные устройства обычно имеют ширину меньше 768px)
+    const isMobileScreen = window.innerWidth <= 768;
+    
+    // Проверяем наличие сенсорного экрана
+    const hasTouchScreen = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    
+    return hasMobileUA || (isMobileScreen && hasTouchScreen);
+  }, []);
+
+  // Функция проверки мобильного устройства с использованием Telegram WebApp SDK
+  const isMobileDevice = useCallback(() => {
+    // Приоритет: используем Telegram WebApp SDK для определения платформы
+    if (WebApp && WebApp.platform) {
+      const platform = WebApp.platform.toLowerCase();
+      console.log('Telegram WebApp platform:', platform);
+      
+      // Telegram WebApp платформы: android, ios, macos, windows, linux, web
+      const mobilePlatforms = ['android', 'ios'];
+      const isTelegramMobile = mobilePlatforms.includes(platform);
+      
+      // Если это веб-версия в Telegram, дополнительно проверяем устройство
+      if (platform === 'web') {
+        return checkBrowserMobileDevice();
+      }
+      
+      return isTelegramMobile;
+    }
+    
+    // Fallback: проверяем через браузер, если SDK недоступен
+    return checkBrowserMobileDevice();
+  }, [checkBrowserMobileDevice]);
+
+  // Проверяем, может ли пользователь играть с ПК
+  const canPlayOnPC = user?.id && ALLOW_PC_PLAY.includes(user.id);
+  
+  // Проверяем, разрешена ли игра на текущем устройстве
+  const isDeviceAllowed = isMobileDevice() || canPlayOnPC;
 
   // НАСТРОЙКИ БАЛАНСА ИГРЫ (легко настраивать)
   const GAME_SETTINGS = {
@@ -89,6 +139,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
   };
 
   const [gameState, setGameState] = useState<GameState>('menu');
+  const [gameMode, setGameMode] = useState<GameMode>('training');
   const [maze, setMaze] = useState<number[][]>([]);
   const [playerPos, setPlayerPos] = useState<Position>({ x: 1, y: 1 }); // Начальная позиция, будет перезаписана при старте игры
   const [prizePos, setPrizePos] = useState<Position>({ x: 0, y: 0 });
@@ -116,6 +167,69 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
   const [lastActionTime, setLastActionTime] = useState(0); // НОВОЕ: защита от спама
   const [showMap, setShowMap] = useState(false); // Состояние для показа/скрытия карты
 
+  // Добавляем состояния для управления звуком
+  const [soundsEnabled, setSoundsEnabled] = useState(true);
+  const [musicEnabled, setMusicEnabled] = useState(true);
+  const [hasUserInteracted, setHasUserInteracted] = useState(false);
+
+  // Инициализация Telegram WebApp
+  useEffect(() => {
+    WebApp.requestFullscreen();
+    WebApp.disableVerticalSwipes();
+    WebApp.disableClosingConfirmation();
+    WebApp.expand();
+    
+    // Блокируем смену ориентации на портретную
+    const lockOrientation = async () => {
+      try {
+        // Проверяем поддержку Screen Orientation API
+        const screenAny = window.screen as any;
+        if (screenAny.orientation && typeof screenAny.orientation.lock === 'function') {
+          await screenAny.orientation.lock('portrait');
+          console.log('Ориентация заблокирована на портретную');
+        } else if (screenAny.lockOrientation) {
+          // Fallback для старых браузеров
+          screenAny.lockOrientation('portrait');
+          console.log('Ориентация заблокирована через legacy API');
+        }
+      } catch (error) {
+        console.log('Не удалось заблокировать ориентацию:', error);
+        
+        // Fallback: добавляем CSS стили для принудительной портретной ориентации
+        const style = document.createElement('style');
+        style.textContent = `
+          @media screen and (orientation: landscape) {
+            html {
+              transform: rotate(-90deg);
+              transform-origin: left top;
+              width: 100vh;
+              overflow-x: hidden;
+              position: absolute;
+              top: 100%;
+              left: 0;
+            }
+          }
+        `;
+        document.head.appendChild(style);
+      }
+    };
+    
+    lockOrientation();
+    
+    // Отключаем стандартные жесты браузера для свайпов
+    const preventSwipe = (e: TouchEvent) => {
+      if (e.touches.length === 1) {
+        e.preventDefault();
+      }
+    };
+    
+    document.addEventListener('touchmove', preventSwipe, { passive: false });
+    
+    return () => {
+      document.removeEventListener('touchmove', preventSwipe);
+    };
+  }, []);
+
   // Проверка доступных направлений
   const getAvailableDirections = useCallback((): Direction[] => {
     const directions: Direction[] = [];
@@ -134,12 +248,274 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     return playerPos.x === prizePos.x && playerPos.y === prizePos.y;
   }, [playerPos, prizePos]);
   
+  // Создание аудио объектов для звуков
+  const stepAudio = useRef<HTMLAudioElement | null>(null);
+  const btnAudio = useRef<HTMLAudioElement | null>(null);
+  const bgAudio = useRef<HTMLAudioElement | null>(null);
+  const [audioInitialized, setAudioInitialized] = useState(false);
+  const [btnAudioInitialized, setBtnAudioInitialized] = useState(false);
+  const [bgAudioInitialized, setBgAudioInitialized] = useState(false);
+  
+  // Инициализация аудио при первом рендере
+  useEffect(() => {
+    // Звук шагов
+    stepAudio.current = new Audio('/step.mp3');
+    stepAudio.current.volume = 0.3;
+    stepAudio.current.preload = 'auto';
+    
+    // Звук кнопок
+    btnAudio.current = new Audio('/btn.mp3');
+    btnAudio.current.volume = 0.4;
+    btnAudio.current.preload = 'auto';
+
+    // Фоновая музыка
+    bgAudio.current = new Audio('/bg.mp3');
+    bgAudio.current.volume = 0.2;
+    bgAudio.current.loop = true;
+    bgAudio.current.preload = 'auto';
+    
+    // Обработчики для звука шагов
+    stepAudio.current.addEventListener('canplaythrough', () => {
+      console.log('Аудио файл шагов загружен и готов к воспроизведению');
+      setAudioInitialized(true);
+    });
+    
+    stepAudio.current.addEventListener('error', (e) => {
+      console.error('Ошибка загрузки аудио файла шагов:', e);
+    });
+
+    // Обработчики для звука кнопок
+    btnAudio.current.addEventListener('canplaythrough', () => {
+      console.log('Аудио файл кнопок загружен и готов к воспроизведению');
+      setBtnAudioInitialized(true);
+    });
+    
+    btnAudio.current.addEventListener('error', (e) => {
+      console.error('Ошибка загрузки аудио файла кнопок:', e);
+    });
+
+    // Обработчики для фоновой музыки
+    bgAudio.current.addEventListener('canplaythrough', () => {
+      console.log('Фоновая музыка загружена и готова к воспроизведению');
+      setBgAudioInitialized(true);
+    });
+    
+    bgAudio.current.addEventListener('error', (e) => {
+      console.error('Ошибка загрузки фоновой музыки:', e);
+    });
+
+    return () => {
+      // Очистка при размонтировании
+      if (bgAudio.current) {
+        bgAudio.current.pause();
+      }
+    };
+  }, []);
+
+  // Инициализация аудио контекста при первом взаимодействии
+  const initializeAudio = useCallback(async () => {
+    if (stepAudio.current && !audioInitialized) {
+      try {
+        stepAudio.current.volume = 0;
+        await stepAudio.current.play();
+        stepAudio.current.pause();
+        stepAudio.current.currentTime = 0;
+        stepAudio.current.volume = 0.3;
+        console.log('Аудио контекст шагов инициализирован');
+      } catch (error) {
+        console.log('Не удалось инициализировать аудио контекст шагов:', error);
+      }
+    }
+
+    if (btnAudio.current && !btnAudioInitialized) {
+      try {
+        btnAudio.current.volume = 0;
+        await btnAudio.current.play();
+        btnAudio.current.pause();
+        btnAudio.current.currentTime = 0;
+        btnAudio.current.volume = 0.4;
+        console.log('Аудио контекст кнопок инициализирован');
+      } catch (error) {
+        console.log('Не удалось инициализировать аудио контекст кнопок:', error);
+      }
+    }
+
+    if (bgAudio.current && !bgAudioInitialized && musicEnabled) {
+      try {
+        bgAudio.current.volume = 0;
+        await bgAudio.current.play();
+        bgAudio.current.pause();
+        bgAudio.current.currentTime = 0;
+        bgAudio.current.volume = 0.2;
+        console.log('Аудио контекст фоновой музыки инициализирован');
+      } catch (error) {
+        console.log('Не удалось инициализировать фоновую музыку:', error);
+      }
+    }
+  }, [audioInitialized, btnAudioInitialized, bgAudioInitialized, musicEnabled]);
+
+  // Функция воспроизведения звука шага
+  const playStepSound = useCallback(async () => {
+    if (!soundsEnabled) return;
+    
+    // Инициализируем аудио при первом взаимодействии
+    if (!audioInitialized) {
+      await initializeAudio();
+    }
+
+    if (stepAudio.current && audioInitialized) {
+      try {
+        stepAudio.current.currentTime = 0;
+        const playPromise = stepAudio.current.play();
+        
+        if (playPromise !== undefined) {
+          playPromise.catch(error => {
+            console.log('Не удалось воспроизвести звук шага:', error);
+          });
+        }
+      } catch (error) {
+        console.log('Ошибка воспроизведения звука шага:', error);
+      }
+    }
+  }, [audioInitialized, soundsEnabled, initializeAudio]);
+
+  // Функция воспроизведения звука шага с задержкой
+  const playStepSoundWithDelay = useCallback(async () => {
+    if (!soundsEnabled) return;
+    
+    // Инициализируем аудио при первом взаимодействии
+    if (!audioInitialized) {
+      await initializeAudio();
+    }
+
+    if (stepAudio.current && audioInitialized) {
+      try {
+        stepAudio.current.currentTime = 0;
+        const playPromise = stepAudio.current.play();
+        
+        if (playPromise !== undefined) {
+          playPromise.catch(error => {
+            console.log('Не удалось воспроизвести звук шага:', error);
+          });
+        }
+        
+        // Добавляем задержку для синхронизации
+        await new Promise(resolve => setTimeout(resolve, 150));
+      } catch (error) {
+        console.log('Ошибка воспроизведения звука шага:', error);
+      }
+    }
+  }, [audioInitialized, soundsEnabled, initializeAudio]);
+
+  // Функция воспроизведения звука кнопки
+  const playBtnSound = useCallback(async () => {
+    // Отмечаем первое взаимодействие пользователя
+    if (!hasUserInteracted) {
+      setHasUserInteracted(true);
+    }
+    
+    if (!soundsEnabled) return;
+    
+    // Инициализируем аудио при первом взаимодействии
+    if (!btnAudioInitialized) {
+      await initializeAudio();
+    }
+
+    if (btnAudio.current && btnAudioInitialized) {
+      try {
+        btnAudio.current.currentTime = 0;
+        const playPromise = btnAudio.current.play();
+        
+        if (playPromise !== undefined) {
+          playPromise.catch(error => {
+            console.log('Не удалось воспроизвести звук кнопки:', error);
+          });
+        }
+      } catch (error) {
+        console.log('Ошибка воспроизведения звука кнопки:', error);
+      }
+    }
+  }, [btnAudioInitialized, initializeAudio, soundsEnabled, hasUserInteracted]);
+
+  // Функция воспроизведения звука кнопки с задержкой
+  const playBtnSoundWithDelay = useCallback(async () => {
+    // Отмечаем первое взаимодействие пользователя
+    if (!hasUserInteracted) {
+      setHasUserInteracted(true);
+    }
+    
+    if (!soundsEnabled) return;
+    
+    // Инициализируем аудио при первом взаимодействии
+    if (!btnAudioInitialized) {
+      await initializeAudio();
+    }
+
+    if (btnAudio.current && btnAudioInitialized) {
+      try {
+        btnAudio.current.currentTime = 0;
+        const playPromise = btnAudio.current.play();
+        
+        if (playPromise !== undefined) {
+          playPromise.catch(error => {
+            console.log('Не удалось воспроизвести звук кнопки:', error);
+          });
+        }
+        
+        // Добавляем задержку для синхронизации
+        await new Promise(resolve => setTimeout(resolve, 100));
+      } catch (error) {
+        console.log('Ошибка воспроизведения звука кнопки:', error);
+      }
+    }
+  }, [btnAudioInitialized, initializeAudio, soundsEnabled, hasUserInteracted]);
+
+  // Функция управления фоновой музыкой
+  const toggleBackgroundMusic = useCallback(async () => {
+    if (!bgAudio.current) return;
+
+    // Музыка играет только в лабиринте
+    const shouldPlayMusic = musicEnabled && gameState === 'playing';
+
+    if (shouldPlayMusic) {
+      // Включаем музыку
+      if (!bgAudioInitialized) {
+        await initializeAudio();
+      }
+      
+      if (bgAudioInitialized) {
+        try {
+          bgAudio.current.currentTime = 0;
+          bgAudio.current.volume = 0.2;
+          await bgAudio.current.play();
+        } catch (error) {
+          console.log('Не удалось запустить фоновую музыку:', error);
+        }
+      }
+    } else {
+      // Выключаем музыку
+      bgAudio.current.pause();
+    }
+  }, [musicEnabled, bgAudioInitialized, initializeAudio, gameState]);
+
+  // Запуск/остановка фоновой музыки при изменении состояния игры или настроек
+  useEffect(() => {
+    if (hasUserInteracted) {
+      toggleBackgroundMusic();
+    }
+  }, [musicEnabled, gameState, hasUserInteracted, toggleBackgroundMusic]);
+
+
+
   // Движение игрока
-  const movePlayer = useCallback((direction: Direction) => {
+  const movePlayer = useCallback(async (direction: Direction) => {
     if (gameState !== 'playing') return;
     
     const directions = getAvailableDirections();
     if (!directions.includes(direction)) return;
+    
+    // Воспроизводим звук шага и ждем его завершения
+    await playStepSoundWithDelay();
     
     setPlayerPos(prev => {
       const newPos = { ...prev };
@@ -153,7 +529,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     });
     
     setStepCount(prev => prev + 1);
-  }, [gameState, getAvailableDirections]);
+  }, [gameState, getAvailableDirections, playStepSoundWithDelay]);
   
   // Завершение игры и сохранение результатов
   const finishGameSession = useCallback(async (won: boolean) => {
@@ -161,20 +537,82 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     
     const timeSpent = Math.floor((Date.now() - gameStartTime) / 1000);
     const finalPosition = { x: playerPos.x, y: playerPos.y };
+    const exitPosition = { x: prizePos.x, y: prizePos.y }; // В тренировочном режиме это выход
     
     try {
-      await gameAPI.finishGame(currentSessionId, won, stepCount, timeSpent, finalPosition);
-      
-      // Обновляем статистику игрока
-      const newStats = await gameAPI.getPlayerStats(user.id);
-      setPlayerStats(newStats);
+      if (gameMode === 'training') {
+        // Используем API для тренировочного режима
+        await gameAPI.finishTrainingSession(
+          currentSessionId, 
+          won, 
+          stepCount, 
+          timeSpent, 
+          finalPosition, 
+          exitPosition
+        );
+        
+        // Обновляем статистику тренировок
+        const newStats = await gameAPI.getTrainingStats(user.id);
+        setPlayerStats({
+          total_attempts: newStats.total_attempts,
+          total_wins: newStats.total_wins,
+          total_spent_stars: 0, // В тренировочном режиме не тратим звёзды
+        });
+      } else {
+        // Используем старый API для реального режима
+        await gameAPI.finishGame(currentSessionId, won, stepCount, timeSpent, finalPosition);
+        
+        // Обновляем статистику игрока
+        const newStats = await gameAPI.getPlayerStats(user.id);
+        setPlayerStats(newStats);
+      }
     } catch (error) {
       console.error('Ошибка завершения игровой сессии:', error);
     }
-  }, [currentSessionId, user?.id, gameStartTime]); // Убрали playerPos и stepCount
+  }, [currentSessionId, user?.id, gameStartTime, gameMode, stepCount, playerPos, prizePos]);
+
+  // Функция выхода в меню во время игры
+  const exitToMenu = useCallback(async () => {
+    // Воспроизводим звук кнопки и ждем
+    await playBtnSoundWithDelay();
+    
+    // Показываем подтверждение
+    const confirmed = window.confirm('Вы уверены, что хотите выйти в меню? Прогресс игры будет потерян.');
+    if (!confirmed) return;
+
+    // Завершаем игровую сессию как проигрыш
+    if (currentSessionId && user?.id) {
+      await finishGameSession(false);
+    }
+
+    // Очищаем таймер
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+
+    // Сбрасываем состояния игры
+    setCurrentSessionId(null);
+    setGameStartTime(0);
+    setStepCount(0);
+    setTimeLeft(GAME_SETTINGS.GAME_TIME);
+    setIsPrizeClaimed(false);
+    setIsClaimingPrize(false);
+    setPrizeClaimAttempts(0);
+    setShowMap(false);
+
+    // Возвращаемся в меню
+    setGameState('menu');
+  }, [currentSessionId, user?.id, finishGameSession, playBtnSoundWithDelay]);
 
   // Получение приза (ИСПРАВЛЕНО - усиленная защита от повторных вызовов)
   const claimPrize = useCallback(async () => {
+    // НЕ позволяем получать приз, если устройство не разрешено
+    if (!isDeviceAllowed) {
+      console.error('Получение приза недоступно на данном устройстве');
+      return;
+    }
+    
     // Усиленная защита от повторных вызовов
     if (isPrizeClaimed || isClaimingPrize || !user?.id || !currentSessionId || prizeClaimAttempts >= 3) {
       if (prizeClaimAttempts >= 3) {
@@ -213,7 +651,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     } finally {
       setIsClaimingPrize(false);
     }
-  }, [user?.id, currentSessionId, isPrizeClaimed, isClaimingPrize, prizeClaimAttempts, gameState, timeLeft, stepCount]);
+  }, [user?.id, currentSessionId, isPrizeClaimed, isClaimingPrize, prizeClaimAttempts, gameState, timeLeft, stepCount, isDeviceAllowed]);
 
   // Проверка победы после каждого хода
   useEffect(() => {
@@ -222,34 +660,6 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
       finishGameSession(true);
     }
   }, [gameState, checkForPrize, finishGameSession]);
-  
-  // Обработка свайпов
-  const handleTouchStart = useCallback((e: React.TouchEvent) => {
-    const touch = e.touches[0];
-    (e.target as any).touchStartX = touch.clientX;
-    (e.target as any).touchStartY = touch.clientY;
-  }, []);
-  
-  const handleTouchEnd = useCallback((e: React.TouchEvent) => {
-    const target = e.target as any;
-    if (!target.touchStartX || !target.touchStartY) return;
-    
-    const touch = e.changedTouches[0];
-    const deltaX = touch.clientX - target.touchStartX;
-    const deltaY = touch.clientY - target.touchStartY;
-    
-    const minSwipeDistance = 50;
-    
-    if (Math.abs(deltaX) > Math.abs(deltaY)) {
-      if (Math.abs(deltaX) > minSwipeDistance) {
-        movePlayer(deltaX > 0 ? 'right' : 'left');
-      }
-    } else {
-      if (Math.abs(deltaY) > minSwipeDistance) {
-        movePlayer(deltaY > 0 ? 'down' : 'up');
-      }
-    }
-  }, [movePlayer]);
   
   // Обработка клавиш
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
@@ -305,6 +715,9 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     const loadPlayerData = async () => {
       if (!user?.id) return;
       
+      // НЕ загружаем данные, если устройство не разрешено
+      if (!isDeviceAllowed) return;
+      
       try {
         // Для дебаг пользователя всегда разрешаем бесплатную игру
         if (isDebugUser) {
@@ -322,23 +735,29 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
           }
         }
         
-        // Загружаем статистику игрока
-        const stats = await gameAPI.getPlayerStats(user.id);
-        setPlayerStats(stats);
+        // Загружаем статистику тренировок
+        const stats = await gameAPI.getTrainingStats(user.id);
+        setPlayerStats({
+          total_attempts: stats.total_attempts,
+          total_wins: stats.total_wins,
+          total_spent_stars: 0, // В новой модели показываем уровень поддержки отдельно
+        });
         
-        // Загружаем стоимость доступного приза
-        const prizeVal = await gameAPI.getAvailablePrizeValue();
-        setPrizeValue(prizeVal);
+        // В новой модели не нужна стоимость приза для главного экрана
+        // setPrizeValue остается пустым
       } catch (error) {
         console.error('Ошибка загрузки данных игрока:', error);
       }
     };
     
     loadPlayerData();
-  }, [user, isDebugUser]);
+  }, [user, isDebugUser, isDeviceAllowed]);
 
   // Таймер cooldown (ИЗМЕНЕНО для дебага)
   useEffect(() => {
+    // НЕ запускаем таймер, если устройство не разрешено
+    if (!isDeviceAllowed) return;
+    
     if (cooldownTime > 0 && !hasFreeTry && !isDebugUser) {
       const timer = setInterval(() => {
         setCooldownTime(prev => {
@@ -352,10 +771,19 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
       
       return () => clearInterval(timer);
     }
-  }, [cooldownTime, hasFreeTry, isDebugUser]);
+  }, [cooldownTime, hasFreeTry, isDebugUser, isDeviceAllowed]);
 
   // Инициализация игры (ДОПОЛНЕНО - сброс счетчика попыток)
-  const startGame = useCallback(async (isFree = true) => {
+  const startGame = useCallback(async (mode: GameMode = 'training') => {
+    // Воспроизводим звук кнопки и ждем
+    await playBtnSoundWithDelay();
+    
+    // НЕ позволяем начать игру, если устройство не разрешено
+    if (!isDeviceAllowed) {
+      console.error('Игра недоступна на данном устройстве');
+      return;
+    }
+    
     // ДОБАВЛЕНО: защита от спама
     const now = Date.now();
     if (now - lastActionTime < 1000) { // 1 секунда между стартами игр
@@ -374,28 +802,41 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     setIsClaimingPrize(false);
     setPrizeClaimAttempts(0); // НОВОЕ: сбрасываем счетчик
     setShowMap(false); // Сбрасываем показ карты
+    setGameMode(mode); // Устанавливаем режим игры
 
     try {
-      // Добавляем дополнительную проверку перед стартом
-      if (isFree && !isDebugUser) {
+      // Для тренировочного режима не нужны проверки доступности
+      if (mode === 'real' && !isDebugUser) {
         const canPlay = await gameAPI.canPlayFree(user.id);
         if (!canPlay) {
-          alert('❌ Бесплатная попытка недоступна. Подождите окончания кулдауна.');
+          alert('❌ Попытка недоступна. Подождите окончания кулдауна.');
           return;
         }
       }
 
-      // Для дебаг пользователя не регистрируем попытки в БД
+      // Регистрируем игровую сессию в зависимости от режима
       let sessionId;
       if (isDebugUser) {
         sessionId = crypto.randomUUID();
+      } else if (mode === 'training') {
+        // Используем новый API для тренировочного режима
+        sessionId = await gameAPI.registerTrainingSession(
+          user.id,
+          user.first_name,
+          user.username
+        );
+        
+        if (!sessionId) {
+          alert('❌ Не удалось зарегистрировать тренировочную сессию. Попробуйте позже.');
+          return;
+        }
       } else {
-        // Регистрируем попытку в базе данных
+        // Регистрируем попытку в базе данных для реального режима
         sessionId = await gameAPI.registerAttempt(
           user.id,
           user.first_name,
           user.username,
-          isFree
+          mode === 'real'
         );
         
         if (!sessionId) {
@@ -428,7 +869,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
       setStepCount(0);
       setGameState('playing');
       
-      if (isFree && !isDebugUser) {
+      if (mode === 'real' && !isDebugUser) {
         setHasFreeTry(false);
         // Обновляем cooldown
         const timeUntil = await gameAPI.getTimeUntilNextFree(user.id);
@@ -437,10 +878,19 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
     } catch (error) {
       console.error('Ошибка старта игры:', error);
     }
-  }, [user, isDebugUser, lastActionTime]);
+  }, [user, isDebugUser, lastActionTime, isDeviceAllowed, playBtnSoundWithDelay]);
   
   // Функция оплаты в звёздах
   const buyAttempt = useCallback(async () => {
+    // Воспроизводим звук кнопки и ждем
+    await playBtnSoundWithDelay();
+    
+    // НЕ позволяем покупать попытки, если устройство не разрешено
+    if (!isDeviceAllowed) {
+      console.error('Покупка недоступна на данном устройстве');
+      return;
+    }
+    
     // ДОБАВЛЕНО: защита от спама
     const now = Date.now();
     if (now - lastActionTime < 2000) { // 2 секунды между действиями
@@ -478,7 +928,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
             
             if (isVerified) {
               console.log('Платеж подтвержден и записан');
-              startGame(false);
+              startGame('real');
             } else {
               if (WebApp.showAlert) {
                 WebApp.showAlert('Платеж не подтвержден. Попробуйте еще раз.');
@@ -502,14 +952,14 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
               if (confirmed) {
                 // Симулируем успешную оплату
                 await gameAPI.verifyAndRecordPayment(user.id, paymentData.payload);
-                startGame(false);
+                startGame('real');
               }
             }
           );
         } else {
           // Совсем простой fallback
           setIsPaymentProcessing(false);
-          startGame(false);
+          startGame('real');
         }
       }
       
@@ -521,7 +971,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
         WebApp.showAlert('Ошибка создания платежа. Попробуйте позже.');
       }
     }
-  }, [isPaymentProcessing, user, startGame, lastActionTime]);
+  }, [isPaymentProcessing, user, startGame, lastActionTime, isDeviceAllowed, playBtnSoundWithDelay]);
   
   // Обработчики событий
   useEffect(() => {
@@ -674,7 +1124,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
                 content = '🚶';
               } else if (isPrize) {
                 bgColor = 'bg-green-500';
-                content = '🎁';
+                content = gameMode === 'training' ? '🚪' : '🎁';
               }
               
               return (
@@ -698,6 +1148,272 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
           <div>Стартовая позиция: ({playerPos.x}, {playerPos.y})</div>
           <div>Позиция приза: ({prizePos.x}, {prizePos.y})</div>
         </div>
+      </div>
+    );
+  };
+
+  // Компонент лидербордов
+  const LeaderboardsScreen = () => {
+    const [selectedCategory, setSelectedCategory] = useState<'steps' | 'time' | 'winrate' | 'supporters'>('steps');
+    const [leaderboardData, setLeaderboardData] = useState<any[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+
+    // Загрузка данных лидерборда
+    useEffect(() => {
+      const loadLeaderboard = async () => {
+        setIsLoading(true);
+        try {
+          let data: any[] = [];
+          switch (selectedCategory) {
+            case 'steps':
+              data = await gameAPI.getLeaderboardBestSteps(20);
+              break;
+            case 'time':
+              data = await gameAPI.getLeaderboardBestTime(20);
+              break;
+            case 'winrate':
+              data = await gameAPI.getLeaderboardWinRate(20);
+              break;
+            case 'supporters':
+              data = await gameAPI.getLeaderboardSupporters(20);
+              break;
+          }
+          setLeaderboardData(data);
+        } catch (error) {
+          console.error('Ошибка загрузки лидерборда:', error);
+          setLeaderboardData([]);
+        } finally {
+          setIsLoading(false);
+        }
+      };
+
+      loadLeaderboard();
+    }, [selectedCategory]);
+
+    const categories = [
+      { id: 'steps', label: '🚀 Лучшие шаги', icon: '🚀' },
+      { id: 'time', label: '⚡ Лучшее время', icon: '⚡' },
+      { id: 'winrate', label: '🎯 Винрейт', icon: '🎯' },
+      { id: 'supporters', label: '💖 Меценаты', icon: '💖' }
+    ];
+
+    const formatValue = (category: string, item: any) => {
+      switch (category) {
+        case 'steps':
+          return `${item.best_training_steps} шагов`;
+        case 'time':
+          return `${item.best_training_time}с`;
+        case 'winrate':
+          return `${item.total_training_wins}/${item.total_training_attempts}`;
+        case 'supporters':
+          return `${item.total_donated_stars} ⭐`;
+        default:
+          return '';
+      }
+    };
+
+    const getPlayerName = (item: any) => {
+      return item.username ? `@${item.username}` : `ID${item.telegram_id}`;
+    };
+
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+        <div className={`${bgColor} ${textColor} p-6 rounded-lg w-full max-w-2xl max-h-[80vh] flex flex-col`}>
+          <h2 className="text-2xl font-bold mb-4 text-center">🏆 Лидерборды</h2>
+          
+          {/* Категории */}
+          <div className="grid grid-cols-2 gap-2 mb-6">
+            {categories.map((cat) => (
+              <button
+                key={cat.id}
+                onClick={() => setSelectedCategory(cat.id as any)}
+                className={`py-2 px-3 rounded-lg text-sm font-semibold transition-colors ${
+                  selectedCategory === cat.id
+                    ? 'bg-blue-500 text-white'
+                    : theme === 'dark' ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
+                }`}
+              >
+                {cat.label}
+              </button>
+            ))}
+          </div>
+          
+          {/* Список лидеров */}
+          <div className="flex-1 overflow-y-auto mb-4">
+            {isLoading ? (
+              <div className="text-center py-8">
+                <p className="opacity-75">Загрузка...</p>
+              </div>
+            ) : leaderboardData.length === 0 ? (
+              <div className="text-center py-8">
+                <p className="opacity-75">Пока нет данных</p>
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {leaderboardData.map((item, index) => (
+                  <div 
+                    key={`${item.telegram_id}-${index}`}
+                    className={`flex items-center justify-between p-3 rounded-lg ${
+                      theme === 'dark' ? 'bg-gray-800' : 'bg-gray-100'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className="text-lg font-bold w-8">
+                        {index === 0 ? '🥇' : index === 1 ? '🥈' : index === 2 ? '🥉' : `${index + 1}.`}
+                      </span>
+                      <div>
+                        <p className="font-semibold">{getPlayerName(item)}</p>
+                      </div>
+                    </div>
+                    
+                    <div className="text-right">
+                      <p className="font-bold text-blue-500">
+                        {formatValue(selectedCategory, item)}
+                      </p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setGameState('menu');
+            }}
+            className="w-full bg-gray-500 text-white py-3 px-6 rounded-lg text-lg font-semibold"
+          >
+            ❌ Назад
+          </button>
+        </div>
+      </div>
+    );
+  };
+
+  // Компонент меню донатов
+  const DonationMenu = () => {
+    const donationBundles = [
+      { stars: 1, label: '1 ⭐' },
+      { stars: 5, label: '5 ⭐' },
+      { stars: 10, label: '10 ⭐' },
+      { stars: 100, label: '100 ⭐' },
+      { stars: 1000, label: '1000 ⭐' },
+      { stars: 5000, label: '5000 ⭐' },
+      { stars: 10000, label: '10000 ⭐' },
+      { stars: 50000, label: '50000 ⭐' },
+      { stars: 100000, label: '100000 ⭐' }
+    ];
+
+    const handleDonation = async (stars: number) => {
+      // Воспроизводим звук кнопки и ждем
+      await playBtnSoundWithDelay();
+      
+      if (isPaymentProcessing || !user?.id) return;
+      
+      setIsPaymentProcessing(true);
+      
+      try {
+        // Создаем инвойс через API
+        const paymentData = await gameAPI.createDonationInvoice(
+          user.id, 
+          user.username || user.first_name,
+          stars
+        );
+        
+        if (!paymentData?.invoice_url) {
+          throw new Error('Не удалось создать инвойс для доната');
+        }
+        
+        // Открываем инвойс в Telegram
+        if (WebApp.openInvoice && paymentData.invoice_url !== 'https://t.me/invoice/test') {
+          WebApp.openInvoice(paymentData.invoice_url, async (status: string) => {
+            setIsPaymentProcessing(false);
+            
+            if (status === 'paid') {
+              // Проверяем и записываем донат
+              const isVerified = await gameAPI.verifyAndRecordDonation(
+                user.id, 
+                paymentData.payload,
+                stars
+              );
+              
+              if (isVerified) {
+                console.log('Донат подтвержден и записан');
+                alert(`💖 Спасибо за поддержку проекта!\n\nВаш донат: ${stars} ⭐ засчитан!`);
+                setGameState('menu');
+              } else {
+                if (WebApp.showAlert) {
+                  WebApp.showAlert('Донат не подтвержден. Попробуйте еще раз.');
+                }
+              }
+            } else if (status === 'cancelled') {
+              console.log('Донат отменен пользователем');
+            }
+          });
+        } else {
+          // Режим разработки или тестовая ссылка
+          if (WebApp.showConfirm) {
+            WebApp.showConfirm(
+              `💖 Поддержать проект на ${stars} ⭐?\n\n(Режим тестирования - реальной оплаты не будет)`,
+              async (confirmed: boolean) => {
+                setIsPaymentProcessing(false);
+                if (confirmed) {
+                  // Симулируем успешный донат
+                  await gameAPI.verifyAndRecordDonation(user.id, paymentData.payload, stars);
+                  alert(`💖 Спасибо за поддержку проекта!\n\nВаш донат: ${stars} ⭐ засчитан! (тест)`);
+                  setGameState('menu');
+                }
+              }
+            );
+          } else {
+            // Простой fallback
+            setIsPaymentProcessing(false);
+            alert(`💖 Спасибо за поддержку проекта!\n\nВаш донат: ${stars} ⭐ засчитан! (тест)`);
+            setGameState('menu');
+          }
+        }
+        
+      } catch (error) {
+        console.error('Ошибка доната:', error);
+        setIsPaymentProcessing(false);
+        alert('Произошла ошибка при создании доната. Попробуйте позже.');
+      }
+    };
+
+    return (
+      <div className="flex flex-col text-center max-w-md w-full">
+        <h2 className="text-2xl font-bold mb-4 text-center">💖 Поддержать проект</h2>
+        <p className="text-sm mb-6 text-center opacity-75">
+          Выберите сумму для поддержки разработки игры
+        </p>
+        
+        <div className="grid grid-cols-3 gap-3 mb-6">
+          {donationBundles.map((bundle) => (
+            <button
+              key={bundle.stars}
+              onClick={() => handleDonation(bundle.stars)}
+              disabled={isPaymentProcessing}
+              className={`py-3 px-4 rounded-lg text-sm font-semibold ${
+                isPaymentProcessing
+                  ? 'bg-gray-400 opacity-50'
+                  : 'bg-yellow-500 hover:bg-yellow-600'
+              } text-white transition-colors`}
+            >
+              {bundle.label}
+            </button>
+          ))}
+        </div>
+        
+        <button
+          onClick={async () => {
+            await playBtnSoundWithDelay();
+            setGameState('menu');
+          }}
+          className="w-full bg-gray-500 text-white py-3 px-6 rounded-lg text-lg font-semibold"
+        >
+          ❌ Назад
+        </button>
       </div>
     );
   };
@@ -737,7 +1453,7 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
                 content = '🚶';
               } else if (isPrize) {
                 bgColor = 'bg-green-500';
-                content = '🎁';
+                content = gameMode === 'training' ? '🚪' : '🎁';
               }
               
               return (
@@ -757,10 +1473,10 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
           )}
         </div>
         <div className={`text-xs mt-3 ${infoTextColor} text-center space-y-1`}>
-          <div>📍 Расстояние до приза: {Math.abs(prizePos.x - playerPos.x) + Math.abs(prizePos.y - playerPos.y)} шагов</div>
+          <div>📍 Расстояние до {gameMode === 'training' ? 'выхода' : 'приза'}: {Math.abs(prizePos.x - playerPos.x) + Math.abs(prizePos.y - playerPos.y)} шагов</div>
           <div className="flex justify-center gap-4">
             <span>🚶 Ваша позиция</span>
-            <span>🎁 Приз</span>
+            <span>{gameMode === 'training' ? '🚪 Выход' : '🎁 Приз'}</span>
           </div>
         </div>
       </div>
@@ -773,11 +1489,86 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
   const buttonColor = theme === 'dark' ? 'bg-gray-700' : 'bg-gray-200';
   const activeButtonColor = 'bg-blue-500';
   
-  if (gameState === 'menu') {
+  // Блокировка доступа с ПК для пользователей не из списка разрешенных
+  if (!isDeviceAllowed) {
+    const platformInfo = WebApp?.platform || 'unknown';
+    const isTelegramWebApp = !!(WebApp && WebApp.initData);
+    
     return (
       <div className={`min-h-screen ${bgColor} ${textColor} flex flex-col justify-center items-center p-4`}>
-        <div className="text-center">
-          <h1 className="text-3xl font-bold mb-4">🎯 Maze Prize</h1>
+        <div className="text-center max-w-md">
+          <div className="text-6xl mb-6">📱</div>
+          <h1 className="text-2xl font-bold mb-4">Игра доступна только на мобильных устройствах</h1>
+          <p className="text-lg mb-4 opacity-75">
+            Для лучшего игрового опыта используйте телефон или планшет
+          </p>
+          <div className="text-sm opacity-60 space-y-2">
+            <p>📲 Откройте игру в Telegram на мобильном устройстве</p>
+            
+            {/* Отладочная информация для разработчиков */}
+            {(user?.id || isDebugUser) && (
+              <div className="text-xs mt-4 bg-gray-600 p-3 rounded space-y-1">
+                <p><strong>Отладочная информация:</strong></p>
+                {user?.id && <p>User ID: {user.id}</p>}
+                <p>Telegram Platform: {platformInfo}</p>
+                <p>Is Telegram WebApp: {isTelegramWebApp ? 'Yes' : 'No'}</p>
+                <p>User Agent: {navigator.userAgent.substring(0, 50)}...</p>
+                <p>Screen: {window.innerWidth}x{window.innerHeight}</p>
+                <p>Touch Support: {'ontouchstart' in window ? 'Yes' : 'No'}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  
+  if (gameState === 'menu') {
+    return (
+      <div
+        className={`min-h-screen ${bgColor} ${textColor} flex flex-col justify-center items-center px-4 pb-safe-area-inset-bottom relative`}
+        style={{ 
+          overflow: 'hidden',
+        }}
+      >
+        {/* Элементы управления в безопасной зоне */}
+        <div 
+          className="flex gap-2 absolute top-6 left-1/2 -translate-x-1/2 z-10"
+        >
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setSoundsEnabled(!soundsEnabled);
+            }}
+            className={`p-2 rounded-lg transition-colors ${
+              soundsEnabled 
+                ? 'bg-green-500 hover:bg-green-600' 
+                : 'bg-gray-500 hover:bg-gray-600'
+            } text-white`}
+            title={soundsEnabled ? 'Отключить звуки' : 'Включить звуки'}
+          >
+            {soundsEnabled ? '🔊' : '🔇'}
+          </button>
+          
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setMusicEnabled(!musicEnabled);
+            }}
+            className={`p-2 rounded-lg transition-colors ${
+              musicEnabled 
+                ? 'bg-blue-500 hover:bg-blue-600' 
+                : 'bg-gray-500 hover:bg-gray-600'
+            } text-white`}
+            title={musicEnabled ? 'Отключить музыку' : 'Включить музыку'}
+          >
+            🎵
+          </button>
+        </div>
+
+        <div className="text-center max-w-sm mx-auto">
+          <h1 className="text-3xl font-bold mb-4 mt-0">💰 Money Maze</h1>
           {user && (
             <p className="text-lg mb-2">Привет, {user.first_name}! 👋</p>
           )}
@@ -786,42 +1577,61 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
               🔧 РЕЖИМ ОТЛАДКИ
             </p>
           )}
-          <p className="text-lg mb-4">Найди приз за {GAME_SETTINGS.GAME_TIME} секунд!</p>
+          <p className="text-lg mb-4">Ты попал в лабиринт и должен найти выход за {GAME_SETTINGS.GAME_TIME} секунд, чтобы победить</p>
           <p className="text-sm mb-4 opacity-75">
-            Приз: <span className="font-bold text-green-500">{prizeValue}</span>
+            🎯 Тренировочный режим - бесплатная игра за место в лидербордах
+          </p>
+          <p className="text-sm mb-4 opacity-75">
+            💰 Основной режим игры (находится в разработке) - найди приз и получи деньги
           </p>
           
           {/* Статистика игрока */}
           <div className="text-sm mb-6 opacity-75">
-            <p>🎯 Побед: {playerStats.total_wins} из {playerStats.total_attempts}</p>
             {playerStats.total_attempts > 0 && (
-              <p>📈 Винрейт: {Math.round((playerStats.total_wins / playerStats.total_attempts) * 100)}%</p>
+            <p>🎯 Побед: {playerStats.total_wins} из {playerStats.total_attempts} ({Math.round((playerStats.total_wins / playerStats.total_attempts) * 100)}%)</p>
             )}
             {playerStats.total_spent_stars > 0 && (
-              <p>⭐ Потрачено звёзд: {playerStats.total_spent_stars}</p>
+              <p>Спасибо за поддержку! {playerStats.total_spent_stars}⭐</p>
             )}
+          </div>
+
+          {/* Кнопка лидербордов */}
+          <div className="mb-4">
+            <button
+              onClick={async () => {
+                await playBtnSoundWithDelay();
+                setGameState('leaderboards');
+              }}
+              className="w-full bg-[#a259ff] hover:bg-[#8a42ff] text-white py-2 px-4 rounded-lg text-sm font-semibold transition-colors"
+            >
+              🏆 Лидерборды
+            </button>
           </div>
           
           <div className="space-y-4">
-            {hasFreeTry || isDebugUser ? (
-              <button
-                onClick={() => startGame(true)}
-                className="w-full bg-blue-500 text-white py-3 px-6 rounded-lg text-lg font-semibold"
-              >
-                🆓 Бесплатная попытка {isDebugUser ? '(∞)' : ''}
-              </button>
-            ) : (
-              <button
-                className="w-full bg-gray-400 text-white py-3 px-6 rounded-lg text-lg font-semibold opacity-50"
-                disabled
-              >
-                ⏰ Следующая бесплатная попытка через {Math.floor(cooldownTime / 60)}:{(cooldownTime % 60).toString().padStart(2, '0')}
-              </button>
-            )}
+            {/* Неактивная кнопка "Играть" для будущего режима с призами */}
+            <button
+              className="w-full bg-gray-400 text-white py-3 px-6 rounded-lg text-lg font-semibold opacity-50"
+              disabled
+            >
+              🎮 Играть (скоро)
+            </button>
             
+            {/* Тренировка - всегда доступна */}
+            <button
+              onClick={() => startGame('training')}
+              className="w-full bg-blue-500 text-white py-3 px-6 rounded-lg text-lg font-semibold"
+            >
+              🎯 Тренировка {isDebugUser ? '(debug)' : ''}
+            </button>
+            
+            {/* Кнопка поддержки проекта */}
             {!isDebugUser && (
               <button
-                onClick={buyAttempt}
+                onClick={async () => {
+                  await playBtnSoundWithDelay();
+                  setGameState('donations');
+                }}
                 disabled={isPaymentProcessing}
                 className={`w-full py-3 px-6 rounded-lg text-lg font-semibold ${
                   isPaymentProcessing 
@@ -829,11 +1639,103 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
                     : 'bg-yellow-500 hover:bg-yellow-600'
                 } text-white`}
               >
-                {isPaymentProcessing ? '⏳ Обработка...' : `⭐ Купить попытку (${GAME_SETTINGS.PAID_ATTEMPT_COST} звезд)`}
+                {isPaymentProcessing ? '⏳ Обработка...' : `⭐ Поддержать проект`}
               </button>
             )}
           </div>
         </div>
+        
+
+      </div>
+    );
+  }
+  
+  if (gameState === 'leaderboards') {
+    return (
+      <div 
+        className={`min-h-screen ${bgColor} ${textColor} p-4 relative`}
+      >
+        {/* Элементы управления в безопасной зоне */}
+        <div 
+          className="flex gap-2 absolute top-6 left-1/2 -translate-x-1/2 z-10"
+        >
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setSoundsEnabled(!soundsEnabled);
+            }}
+            className={`p-2 rounded-lg transition-colors ${
+              soundsEnabled 
+                ? 'bg-green-500 hover:bg-green-600' 
+                : 'bg-gray-500 hover:bg-gray-600'
+            } text-white`}
+            title={soundsEnabled ? 'Отключить звуки' : 'Включить звуки'}
+          >
+            {soundsEnabled ? '🔊' : '🔇'}
+          </button>
+          
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setMusicEnabled(!musicEnabled);
+            }}
+            className={`p-2 rounded-lg transition-colors ${
+              musicEnabled 
+                ? 'bg-blue-500 hover:bg-blue-600' 
+                : 'bg-gray-500 hover:bg-gray-600'
+            } text-white`}
+            title={musicEnabled ? 'Отключить музыку' : 'Включить музыку'}
+          >
+            🎵
+          </button>
+        </div>
+        
+        <LeaderboardsScreen />
+      </div>
+    );
+  }
+  
+  if (gameState === 'donations') {
+    return (
+      <div 
+        className={`flex flex-col justify-center items-center min-h-screen ${bgColor} ${textColor} p-4 relative`}
+      >
+        {/* Элементы управления в безопасной зоне */}
+        <div 
+          className="flex gap-2 absolute top-6 left-1/2 -translate-x-1/2 z-10"
+        >
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setSoundsEnabled(!soundsEnabled);
+            }}
+            className={`p-2 rounded-lg transition-colors ${
+              soundsEnabled 
+                ? 'bg-green-500 hover:bg-green-600' 
+                : 'bg-gray-500 hover:bg-gray-600'
+            } text-white`}
+            title={soundsEnabled ? 'Отключить звуки' : 'Включить звуки'}
+          >
+            {soundsEnabled ? '🔊' : '🔇'}
+          </button>
+          
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setMusicEnabled(!musicEnabled);
+            }}
+            className={`p-2 rounded-lg transition-colors ${
+              musicEnabled 
+                ? 'bg-blue-500 hover:bg-blue-600' 
+                : 'bg-gray-500 hover:bg-gray-600'
+            } text-white`}
+            title={musicEnabled ? 'Отключить музыку' : 'Включить музыку'}
+          >
+            🎵
+          </button>
+        </div>
+        
+        <DonationMenu />
       </div>
     );
   }
@@ -841,20 +1743,58 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
   if (gameState === 'playing') {
     return (
       <div 
-        className={`min-h-screen ${bgColor} ${textColor} flex flex-col`}
-        onTouchStart={handleTouchStart}
-        onTouchEnd={handleTouchEnd}
+        className={`min-h-screen ${bgColor} ${textColor} flex flex-col justify-center items-center pt-[10vh] relative`}
       >
+        <div 
+          className="absolute flex gap-1 z-10 top-[4vh] left-1/2 -translate-x-1/2"
+        >
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setSoundsEnabled(!soundsEnabled);
+            }}
+            className={`p-1 rounded text-xs ${
+              soundsEnabled ? 'text-green-500' : 'text-gray-400'
+            }`}
+            title={soundsEnabled ? 'Отключить звуки' : 'Включить звуки'}
+          >
+            {soundsEnabled ? '🔊' : '🔇'}
+          </button>
+          
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setMusicEnabled(!musicEnabled);
+            }}
+            className={`p-1 rounded text-xs ${
+              musicEnabled ? 'text-blue-500' : 'text-gray-400'
+            }`}
+            title={musicEnabled ? 'Отключить музыку' : 'Включить музыку'}
+          >
+            🎵
+          </button>
+        </div>
+
         {/* Верхняя панель */}
-        <div className="flex justify-between items-center p-4 border-b border-gray-300">
-          <div className="text-lg font-semibold">
-            ⏱️ {timeLeft}s
-          </div>
-          <div className="text-sm opacity-75">
-            Шагов: {stepCount}
-          </div>
-          <div className="text-lg font-semibold">
-            🎯 {prizeValue}
+        <div 
+          className="flex w-full justify-between items-center border-b border-gray-300"
+        >
+          {/* Центральная информация */}
+          <div className="flex w-full justify-between items-center ">
+            <div className="text-lg font-semibold">
+              ⏱️ {timeLeft}s
+            </div>
+            <div className="text-sm opacity-75">
+              Шагов: {stepCount}
+            </div>
+            <div className="text-lg font-semibold">
+              <button
+                onClick={exitToMenu}
+                className="text-lg font-semibold text-red-500 hover:text-red-600 transition-colors"
+              >
+                ❌
+              </button>
+            </div>
           </div>
         </div>
         
@@ -864,15 +1804,17 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
         {/* Основной экран - показывает только доступные направления */}
         <div className="flex-1 flex flex-col justify-center items-center p-8">
           <div className="text-center mb-8">
-            <h2 className="text-2xl font-bold mb-4">🚶 Вы здесь</h2>
-            <p className="text-lg opacity-75">Куда можно пойти?</p>
+            <h2 className="text-2xl font-bold mb-4">Ищи выход</h2>
+            <p className="text-lg opacity-75">Стрелки покажут куда можно идти</p>
           </div>
           
           {/* Крестовина направлений */}
           <div className="grid grid-cols-3 gap-4 mb-8">
             <div></div>
             <button
-              onClick={() => movePlayer('up')}
+              onClick={async () => {
+                await movePlayer('up');
+              }}
               className={`w-16 h-16 rounded-lg text-2xl font-bold transition-all ${
                 availableDirections.includes('up') 
                   ? `${activeButtonColor} text-white shadow-lg` 
@@ -885,7 +1827,9 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
             <div></div>
             
             <button
-              onClick={() => movePlayer('left')}
+              onClick={async () => {
+                await movePlayer('left');
+              }}
               className={`w-16 h-16 rounded-lg text-2xl font-bold transition-all ${
                 availableDirections.includes('left') 
                   ? `${activeButtonColor} text-white shadow-lg` 
@@ -899,7 +1843,9 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
               🚶
             </div>
             <button
-              onClick={() => movePlayer('right')}
+              onClick={async () => {
+                await movePlayer('right');
+              }}
               className={`w-16 h-16 rounded-lg text-2xl font-bold transition-all ${
                 availableDirections.includes('right') 
                   ? `${activeButtonColor} text-white shadow-lg` 
@@ -912,7 +1858,9 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
             
             <div></div>
             <button
-              onClick={() => movePlayer('down')}
+              onClick={async () => {
+                await movePlayer('down');
+              }}
               className={`w-16 h-16 rounded-lg text-2xl font-bold transition-all ${
                 availableDirections.includes('down') 
                   ? `${activeButtonColor} text-white shadow-lg` 
@@ -924,31 +1872,6 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
             </button>
             <div></div>
           </div>
-          
-          {/* Список доступных направлений */}
-          <div className="text-center">
-            <p className="text-sm opacity-75 mb-2">Доступные пути:</p>
-            <div className="flex flex-wrap gap-2 justify-center">
-              {availableDirections.map(dir => (
-                <span key={dir} className="bg-blue-500 text-white px-3 py-1 rounded-full text-sm">
-                  {dir === 'up' ? '↑ Север' : 
-                   dir === 'down' ? '↓ Юг' : 
-                   dir === 'left' ? '← Запад' : 
-                   '→ Восток'}
-                </span>
-              ))}
-              {availableDirections.length === 0 && (
-                <span className="text-red-500">Тупик!</span>
-              )}
-            </div>
-          </div>
-        </div>
-        
-        {/* Подсказка */}
-        <div className="p-4 border-t border-gray-300 text-center">
-          <p className="text-sm opacity-75">
-            💡 Свайп или нажмите стрелки для движения
-          </p>
         </div>
       </div>
     );
@@ -956,19 +1879,64 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
   
   if (gameState === 'won') {
     return (
-      <div className={`min-h-screen ${bgColor} ${textColor} flex flex-col justify-center items-center p-4`}>
+      <div 
+        className={`min-h-screen ${bgColor} ${textColor} flex flex-col justify-center items-center p-4 relative`}
+      >
+        {/* Элементы управления в безопасной зоне */}
+        <div 
+          className="fixed flex gap-2 absolute top-6 left-1/2 -translate-x-1/2 z-10"
+        >
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setSoundsEnabled(!soundsEnabled);
+            }}
+            className={`p-2 rounded-lg transition-colors ${
+              soundsEnabled 
+                ? 'bg-green-500 hover:bg-green-600' 
+                : 'bg-gray-500 hover:bg-gray-600'
+            } text-white`}
+            title={soundsEnabled ? 'Отключить звуки' : 'Включить звуки'}
+          >
+            {soundsEnabled ? '🔊' : '🔇'}
+          </button>
+          
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setMusicEnabled(!musicEnabled);
+            }}
+            className={`p-2 rounded-lg transition-colors ${
+              musicEnabled 
+                ? 'bg-blue-500 hover:bg-blue-600' 
+                : 'bg-gray-500 hover:bg-gray-600'
+            } text-white`}
+            title={musicEnabled ? 'Отключить музыку' : 'Включить музыку'}
+          >
+            🎵
+          </button>
+        </div>
         <div className="text-center max-w-md w-full">
-          <div className="text-6xl mb-4">🎉</div>
-          <h1 className="text-3xl font-bold mb-4">Поздравляем!</h1>
-          <p className="text-lg mb-2">Вы нашли приз!</p>
+          <div className="text-6xl mb-4">{gameMode === 'training' ? '🚪' : '🎉'}</div>
+          <h1 className="text-3xl font-bold mb-4">
+            {gameMode === 'training' ? 'Выход найден!' : 'Поздравляем!'}
+          </h1>
+          <p className="text-lg mb-2">
+            {gameMode === 'training' ? 'Вы нашли выход из лабиринта!' : 'Вы нашли приз!'}
+          </p>
           <p className="text-sm opacity-75 mb-6">
             За {GAME_SETTINGS.GAME_TIME - timeLeft} секунд и {stepCount} шагов
           </p>
-          <p className="text-2xl font-bold text-green-500 mb-8">💰 {prizeValue}</p>
+          {gameMode === 'real' && (
+            <p className="text-2xl font-bold text-green-500 mb-8">💰 {prizeValue}</p>
+          )}
           
           {/* Кнопка показа карты и сама карта */}
           <button
-            onClick={() => setShowMap(!showMap)}
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setShowMap(!showMap);
+            }}
             className={`w-full mb-4 py-2 px-4 rounded-lg text-sm font-medium ${
               theme === 'dark' ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
             } ${textColor} transition-colors`}
@@ -988,52 +1956,82 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
           )}
           
           <div className="space-y-4">
-            {isDebugUser ? (
-              <button
-                onClick={() => {
-                  if (!isPrizeClaimed) {
-                    setIsPrizeClaimed(true);
-                    alert('🔧 ДЕБАГ РЕЖИМ\n\nВ реальном режиме здесь был бы получен приз.\nВы можете изучать параметры генерации лабиринта.');
+            {gameMode === 'real' ? (
+              // Кнопки получения приза только в реальном режиме
+              isDebugUser ? (
+                <button
+                  onClick={async () => {
+                    await playBtnSoundWithDelay();
+                    if (!isPrizeClaimed) {
+                      setIsPrizeClaimed(true);
+                      alert('🔧 ДЕБАГ РЕЖИМ\n\nВ реальном режиме здесь был бы получен приз.\nВы можете изучать параметры генерации лабиринта.');
+                    }
+                  }}
+                  disabled={isPrizeClaimed}
+                  className={`w-full py-3 px-6 rounded-lg text-lg font-semibold ${
+                    isPrizeClaimed 
+                      ? 'bg-gray-400 text-white opacity-50' 
+                      : 'bg-yellow-500 text-white hover:bg-yellow-600'
+                  }`}
+                >
+                  {isPrizeClaimed 
+                    ? '✅ Приз получен (дебаг)' 
+                    : `🔧 [ДЕБАГ] Получить приз ${prizeValue}`
                   }
-                }}
-                disabled={isPrizeClaimed}
-                className={`w-full py-3 px-6 rounded-lg text-lg font-semibold ${
-                  isPrizeClaimed 
-                    ? 'bg-gray-400 text-white opacity-50' 
-                    : 'bg-yellow-500 text-white hover:bg-yellow-600'
-                }`}
-              >
-                {isPrizeClaimed 
-                  ? '✅ Приз получен (дебаг)' 
-                  : `🔧 [ДЕБАГ] Получить приз ${prizeValue}`
-                }
-              </button>
-            ) : (
-              <button
-                onClick={claimPrize}
-                disabled={isPrizeClaimed || isClaimingPrize}
-                className={`w-full py-3 px-6 rounded-lg text-lg font-semibold ${
-                  isPrizeClaimed 
-                    ? 'bg-gray-400 text-white opacity-50' 
+                </button>
+              ) : (
+                <button
+                  onClick={async () => {
+                    await playBtnSoundWithDelay();
+                    await claimPrize();
+                  }}
+                  disabled={isPrizeClaimed || isClaimingPrize}
+                  className={`w-full py-3 px-6 rounded-lg text-lg font-semibold ${
+                    isPrizeClaimed 
+                      ? 'bg-gray-400 text-white opacity-50' 
+                      : isClaimingPrize 
+                      ? 'bg-yellow-500 text-white opacity-70'
+                      : 'bg-green-500 text-white hover:bg-green-600'
+                  }`}
+                >
+                  {isPrizeClaimed 
+                    ? '✅ Приз получен' 
                     : isClaimingPrize 
-                    ? 'bg-yellow-500 text-white opacity-70'
-                    : 'bg-green-500 text-white hover:bg-green-600'
-                }`}
-              >
-                {isPrizeClaimed 
-                  ? '✅ Приз получен' 
-                  : isClaimingPrize 
-                  ? '⏳ Получение приза...' 
-                  : `🎁 Получить приз ${prizeValue}`
-                }
-              </button>
+                    ? '⏳ Получение приза...' 
+                    : `🎁 Получить приз ${prizeValue}`
+                  }
+                </button>
+              )
+            ) : (
+              // В тренировочном режиме показываем поздравление с выходом
+              <div className="text-center p-4 bg-green-100 dark:bg-green-900 rounded-lg">
+                <p className="text-green-800 dark:text-green-200 text-lg font-semibold mb-2">
+                  🎉 Вы нашли выход!
+                </p>
+                <p className="text-green-700 dark:text-green-300 text-sm">
+                  Отлично! Результат засчитан в статистику тренировок.
+                </p>
+              </div>
             )}
             
             <button
-              onClick={() => setGameState('menu')}
+              onClick={async () => {
+                await playBtnSound();
+                startGame(gameMode);
+              }}
               className="w-full bg-blue-500 text-white py-3 px-6 rounded-lg text-lg font-semibold"
             >
-              🔄 Играть ещё
+              🔄 Сыграть ещё
+            </button>
+            
+            <button
+              onClick={async () => {
+                await playBtnSoundWithDelay();
+                setGameState('menu');
+              }}
+              className="w-full bg-gray-500 text-white py-3 px-6 rounded-lg text-lg font-semibold"
+            >
+              🏠 На главный экран
             </button>
           </div>
         </div>
@@ -1043,18 +2041,57 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
   
   if (gameState === 'lost') {
     return (
-      <div className={`min-h-screen ${bgColor} ${textColor} flex flex-col justify-center items-center p-4`}>
+      <div 
+        className={`min-h-screen ${bgColor} ${textColor} flex flex-col justify-center items-center p-4 relative`}
+      >
+        {/* Элементы управления в безопасной зоне */}
+        <div 
+          className="flex gap-2 absolute top-6 left-1/2 -translate-x-1/2 z-10"
+        >
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setSoundsEnabled(!soundsEnabled);
+            }}
+            className={`p-2 rounded-lg transition-colors ${
+              soundsEnabled 
+                ? 'bg-green-500 hover:bg-green-600' 
+                : 'bg-gray-500 hover:bg-gray-600'
+            } text-white`}
+            title={soundsEnabled ? 'Отключить звуки' : 'Включить звуки'}
+          >
+            {soundsEnabled ? '🔊' : '🔇'}
+          </button>
+          
+          <button
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setMusicEnabled(!musicEnabled);
+            }}
+            className={`p-2 rounded-lg transition-colors ${
+              musicEnabled 
+                ? 'bg-blue-500 hover:bg-blue-600' 
+                : 'bg-gray-500 hover:bg-gray-600'
+            } text-white`}
+            title={musicEnabled ? 'Отключить музыку' : 'Включить музыку'}
+          >
+            🎵
+          </button>
+        </div>
         <div className="text-center max-w-md w-full">
           <div className="text-6xl mb-4">⏰</div>
           <h1 className="text-3xl font-bold mb-4">Время вышло!</h1>
           <p className="text-lg mb-2">Вы сделали {stepCount} шагов</p>
           <p className="text-sm opacity-75 mb-6">
-            Приз был в {Math.abs(prizePos.x - playerPos.x) + Math.abs(prizePos.y - playerPos.y)} шагах от вас
+            {gameMode === 'training' ? 'Выход' : 'Приз'} был в {Math.abs(prizePos.x - playerPos.x) + Math.abs(prizePos.y - playerPos.y)} шагах от вас
           </p>
           
           {/* Кнопка показа карты и сама карта */}
           <button
-            onClick={() => setShowMap(!showMap)}
+            onClick={async () => {
+              await playBtnSoundWithDelay();
+              setShowMap(!showMap);
+            }}
             className={`w-full mb-4 py-2 px-4 rounded-lg text-sm font-medium ${
               theme === 'dark' ? 'bg-gray-700 hover:bg-gray-600' : 'bg-gray-200 hover:bg-gray-300'
             } ${textColor} transition-colors`}
@@ -1065,7 +2102,17 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
           {showMap && <EndGameMazeView />}
           
           <div className="space-y-4">
-            {!isDebugUser && (
+            <button
+              onClick={async () => {
+                await playBtnSound();
+                startGame(gameMode);
+              }}
+              className="w-full bg-blue-500 text-white py-3 px-6 rounded-lg text-lg font-semibold"
+            >
+              🔄 Сыграть ещё
+            </button>
+            
+            {gameMode === 'real' && !isDebugUser && (
               <button
                 onClick={buyAttempt}
                 disabled={isPaymentProcessing}
@@ -1080,10 +2127,13 @@ const MazeGame = ({ user, theme }: MazeGameProps) => {
             )}
             
             <button
-              onClick={() => setGameState('menu')}
+              onClick={async () => {
+                await playBtnSoundWithDelay();
+                setGameState('menu');
+              }}
               className="w-full bg-gray-500 text-white py-3 px-6 rounded-lg text-lg font-semibold"
             >
-              🏠 В главное меню
+              🏠 На главный экран
             </button>
           </div>
         </div>
